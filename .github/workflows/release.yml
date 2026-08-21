@@ -1,0 +1,95 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYVISTA_OFF_SCREEN: "true"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12.10
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-build.lock
+
+      - name: Verify version and tag
+        run: python build/check_version.py
+
+      - name: Scan tracked source for private material
+        run: python scripts/privacy_scan.py --repo-root .
+
+      - name: Install hash-locked release toolchain
+        run: python -m pip install --require-hashes -r requirements-build.lock
+
+      - name: Run unit and headless GUI smoke tests
+        run: |
+          python -m unittest discover -s tests -v
+          python fmost_brain_viewer.py --ci-smoke-test
+
+      - name: Install pinned Inno Setup 6.7.3
+        shell: pwsh
+        run: |
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+          $installer = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3.exe"
+          $expected = "9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Inno Setup SHA256 mismatch: $actual" }
+          $process = Start-Process -FilePath $installer -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER"
+          ) -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed." }
+
+      - name: Build portable and installer artifacts
+        shell: pwsh
+        run: |
+          $python = (Get-Command python).Source
+          .\build\build_release.ps1 -Python $python -SkipTests -HeadlessSmoke
+
+      - name: Test silent install, frozen app, and uninstall
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem .\release\fMOST-Brain-Viewer-Setup-*-win64.exe -File -ErrorAction Stop
+          if ($setup.Count -ne 1) { throw "Expected exactly one installer." }
+          .\build\test_installer.ps1 -Installer $setup.FullName -HeadlessSmoke
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fMOST-Brain-Viewer-win64
+          path: |
+            release/fMOST-Brain-Viewer-Portable-*-win64.zip
+            release/fMOST-Brain-Viewer-Setup-*-win64.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release from tag
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $files = Get-ChildItem .\release -File | Select-Object -ExpandProperty FullName
+          if (gh release view $tag 2>$null) {
+            gh release upload $tag $files --clobber
+          } else {
+            gh release create $tag $files --verify-tag --title "fMOST Brain Viewer $tag" --generate-notes
+          }

@@ -1,0 +1,2 @@
+# Direct release tooling. Release/CI installs must use requirements-build.lock.
+PyInstaller==6.21.0

@@ -1,0 +1,57 @@
+# Python environments and caches
+.venv/
+venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build and release outputs
+build/pyinstaller/
+dist/
+release/
+artifacts/
+*.exe
+*.msi
+*.zip
+SHA256SUMS.txt
+
+# Experimental inputs and derived atlas data
+*.nrrd
+*.swc
+*.vtp
+*.tif
+*.tiff
+*.gif
+*.csv
+*.npy
+*.raw
+viewer_cache/
+atlas_cache/
+
+# User state, sessions, captures, and logs
+viewer_config.json
+*.fmost-session.json
+*.part
+*.part.*
+captures/
+screenshots/
+recordings/
+*_capture.*
+*_screenshot.*
+*_test.png
+*.log
+
+# Local launchers and editor state
+*.lnk
+*.vbs
+*.bat
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

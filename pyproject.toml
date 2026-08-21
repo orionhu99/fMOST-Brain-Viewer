@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fmost-brain-viewer"
+dynamic = ["version"]
+description = "Interactive 3D visualization of registered fMOST SWC neurons and Allen CCF atlas regions"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy>=2.0",
+  "pynrrd>=1.1",
+  "pyvista>=0.48",
+  "vtk>=9.3",
+  "PySide6>=6.8",
+  "pyvistaqt>=0.11",
+  "scipy>=1.14",
+  "pillow>=10.0",
+]
+
+[project.scripts]
+fmost-brain-viewer = "fmost_brain_viewer:main"
+
+[tool.setuptools]
+py-modules = ["fmost_brain_viewer", "version"]
+
+[tool.setuptools.dynamic]
+version = { attr = "version.__version__" }
+
+[tool.setuptools.data-files]
+assets = ["assets/*.png", "assets/*.ico"]

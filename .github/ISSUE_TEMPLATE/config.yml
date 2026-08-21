@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: User guide
+    url: https://github.com/orionhu99/fMOST-Brain-Viewer/blob/main/docs/USER_GUIDE.md
+    about: Read installation and viewer instructions before filing a bug.
+  - name: Troubleshooting
+    url: https://github.com/orionhu99/fMOST-Brain-Viewer/blob/main/docs/TROUBLESHOOTING.md
+    about: Check common atlas, import, performance, and export problems.

@@ -1,0 +1,9 @@
+# Direct runtime dependencies. Release/CI installs must use requirements.lock.
+numpy==2.5.2
+pynrrd==1.1.3
+pyvista==0.48.4
+vtk==9.6.2
+PySide6==6.11.1
+pyvistaqt==0.12.0
+scipy==1.18.0
+pillow==12.3.0

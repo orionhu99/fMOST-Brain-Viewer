@@ -1,0 +1,3 @@
+# Content-addressed bundled resources must keep stable bytes on every platform.
+resources/allen_structure_graph_1.json text eol=lf
+resources/atlas_manifest.json text eol=lf

@@ -1,0 +1,77 @@
+name: Bug report
+description: Report a reproducible fMOST Brain Viewer problem using sanitized information
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Do not upload real experimental data, local paths, session files, or unredacted logs. A small synthetic reproducer is preferred.
+  - type: input
+    id: version
+    attributes:
+      label: Application version
+      description: Open Help > About fMOST Brain Viewer.
+      placeholder: 2.3.0
+    validations:
+      required: true
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package type
+      options:
+        - Windows Setup
+        - Portable ZIP
+        - Source checkout
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 23H2 x64
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use generic dataset identifiers and list the exact UI actions.
+      placeholder: |
+        1. Open synthetic dataset sample_A
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: self_test
+    attributes:
+      label: Self-test result
+      description: Report the packaged --self-test exit code and, if needed, a sanitized Self-test line from the application log. The windowed build may not print terminal output.
+      render: text
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostic excerpt
+      description: Include only the smallest relevant excerpt. Remove paths, dataset IDs, usernames, and other private information.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I checked this report and its attachments for experimental data, identifiers, and local paths.
+          required: true

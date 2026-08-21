@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: >-
+  If you use fMOST Brain Viewer, please cite the software and separately cite
+  the Allen Institute resources used in your analysis.
+title: fMOST Brain Viewer
+type: software
+authors:
+  - family-names: HU
+    given-names: Orion
+    affiliation: Li Bo Lab, Westlake University
+version: 2.3.0
+date-released: 2026-08-22
+url: https://github.com/orionhu99/fMOST-Brain-Viewer
+repository-code: https://github.com/orionhu99/fMOST-Brain-Viewer
+license: MIT
+keywords:
+  - fMOST
+  - neuron morphology
+  - Allen CCF
+  - 3D visualization
+  - SWC
+preferred-citation:
+  type: software
+  title: fMOST Brain Viewer
+  authors:
+    - family-names: HU
+      given-names: Orion
+      affiliation: Li Bo Lab, Westlake University
+  version: 2.3.0
+  year: 2026
+  url: https://github.com/orionhu99/fMOST-Brain-Viewer
