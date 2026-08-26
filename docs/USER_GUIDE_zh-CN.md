@@ -62,15 +62,18 @@ Portable ZIP 适合无法安装软件的电脑。请先把整个 ZIP 解压到�
 
 ### Appearance
 
-可以调节图谱透明度、axon 粗细、soma 大小和高亮脑区透明度。为防止误操作，鼠标
+可以调节图谱透明度、axon 粗细、soma 大小和高亮脑区透明度。axon 只根据相连的
+SWC line cells 渲染，中间 SWC 节点不会作为固定大小的独立标记显示。为防止误操作，鼠标
 滚轮默认不能修改参数；需要时可在
 **Settings > Enable mouse-wheel parameter adjustment** 开启。
 
 ### Brain regions
 
-输入 acronym、结构全名或 Allen structure ID，再点击 **Add region**。中性的通用
-示例为 `MOp`、`VISp`。生成父级脑区表面时会包括其后代标签。列表复选框控制脑区
-显隐；**Select all** 和 **Select none** 只作用于已加入列表的脑区。
+输入 acronym、结构全名或 Allen structure ID 后，候选项会立即显示在搜索框下方。
+单击用于高亮，双击、按 Enter 或点击 **Add region** 均可添加。成功添加后搜索文字和
+候选列表会自动清空、收起；点击搜索区域以外的位置也会收起候选列表。生成父级脑区
+表面时会包括其后代标签。列表复选框控制脑区显隐；**Select all** 和 **Select none**
+只作用于已加入列表的脑区。
 
 ### Neurons
 
@@ -99,6 +102,10 @@ Portable ZIP 适合无法安装软件的电脑。请先把整个 ZIP 解压到�
 Session 可能包含本机路径和数据集 ID，分享前请检查并脱敏。
 
 ## 7. 日志和支持
+
+使用 **Help > Check for updates...** 可在后台查询 GitHub 已发布的正式版本，不会阻塞
+3D 界面。选择新版本后，软件会下载安装器、校验 GitHub SHA-256 并启动安装。更新只
+替换程序文件，图谱、项目、session、cache 和用户设置都会保留。
 
 启动或渲染报错后，可使用 **Help > Open log folder**。日志只保存在本机，不会自动
 上传。公开提交 issue 前请移除或替换本机路径、数据集 ID 等内容。

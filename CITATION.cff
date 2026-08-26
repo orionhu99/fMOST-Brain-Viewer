@@ -26,6 +26,6 @@ preferred-citation:
     - family-names: HU
       given-names: Orion
       affiliation: Li Bo Lab, Westlake University
-  version: 2.3.1
+  version: 2.3.3
   year: 2026
   url: https://github.com/orionhu99/fMOST-Brain-Viewer

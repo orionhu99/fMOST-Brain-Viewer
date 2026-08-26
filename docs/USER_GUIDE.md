@@ -73,16 +73,20 @@ as the button is released.
 ### Appearance
 
 Adjust atlas opacity, axon width, soma size, and highlighted-region opacity.
+Axons use connected SWC line cells only; intermediate SWC nodes are not drawn
+as separate fixed-size markers.
 Mouse-wheel parameter changes are disabled by default to prevent accidental
 editing. Enable them from **Settings > Enable mouse-wheel parameter adjustment**.
 
 ### Brain regions
 
-Search by acronym, structure name, or Allen structure ID, then choose **Add
-region**. Neutral examples are `MOp` and `VISp`. Parent structures include their
-descendant labels when the surface is generated. Region checkboxes control
-visibility; **Select all** and **Select none** affect only regions already in the
-list.
+Type an acronym, structure name, or Allen structure ID to show ranked results
+immediately below the search box. Click to highlight a result; double-click,
+press Enter, or choose **Add region** to add it. A successful selection clears
+and closes the search, while clicking elsewhere closes the candidate list.
+Parent structures include their descendant labels when the surface is generated.
+Region checkboxes control visibility; **Select all** and **Select none** affect
+only regions already in the list.
 
 ### Neurons
 
@@ -116,6 +120,11 @@ Session files can contain local paths and dataset identifiers. Review them befor
 sharing.
 
 ## 7. Logs and support
+
+Choose **Help > Check for updates...** to query published stable GitHub Releases
+without blocking the viewer. Select a newer version to download its Windows
+installer, verify the GitHub SHA-256 digest, and start Setup. Application files
+are replaced; atlas data, projects, sessions, caches, and settings are preserved.
 
 Choose **Help > Open log folder** after a startup or rendering error. Logs are
 local and are never uploaded automatically. Remove or replace paths and dataset
