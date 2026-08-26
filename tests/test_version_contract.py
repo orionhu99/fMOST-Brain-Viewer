@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class VersionContractTests(unittest.TestCase):
     def test_public_release_version(self) -> None:
-        self.assertEqual(__version__, "2.3.1")
+        self.assertEqual(__version__, "2.3.2")
 
     def test_package_uses_version_module_as_single_source(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))

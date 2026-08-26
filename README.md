@@ -15,7 +15,7 @@ rotating GIF export, and reusable sessions.
 
 Python, Git, and a command prompt are **not** required.
 
-1. Download `fMOST-Brain-Viewer-Setup-2.3.1-win64.exe` from the
+1. Download `fMOST-Brain-Viewer-Setup-2.3.2-win64.exe` from the
    [latest release](https://github.com/orionhu99/fMOST-Brain-Viewer/releases/latest).
 2. Double-click the installer and follow the short setup wizard.
 3. Start **fMOST Brain Viewer**. On first launch, download the Allen CCF atlas or
@@ -82,12 +82,13 @@ manual region corrections, and import diagnostics.
 - Save and reopen multi-dataset `.fmost-session.json` sessions.
 - Export TIFF, PNG, JPEG, or BMP captures and looping rotating GIFs.
 - Limit hidden axon actor caching to reduce memory growth during long sessions.
+- Check GitHub Releases from the Help menu and install a selected newer version.
 
 ## Privacy and data handling
 
 fMOST Brain Viewer contains no telemetry and does not upload user datasets.
 Network access occurs only when the user explicitly requests Allen atlas or
-ontology resources. SWC, CSV, and NRRD inputs are read-only; derived caches,
+ontology resources, or chooses **Help > Check for updates**. SWC, CSV, and NRRD inputs are read-only; derived caches,
 settings, logs, captures, and sessions are stored separately. Before sharing a
 session, log, or screenshot, review it for paths and identifiers from your own
 environment.
@@ -97,7 +98,7 @@ environment.
 - [English user guide](docs/USER_GUIDE.md)
 - [中文用户指南](docs/USER_GUIDE_zh-CN.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
-- In the application: **Help > Open log folder** and **Help > About fMOST Brain Viewer**
+- In the application: **Help > Check for updates**, **Open log folder**, and **About fMOST Brain Viewer**
 
 When filing an issue, attach only sanitized diagnostics. Do not upload
 experimental data unless you intentionally choose to make them public.
@@ -115,4 +116,4 @@ other dependencies retain their own terms; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Citation metadata are provided
 in [CITATION.cff](CITATION.cff).
 
-Current version: **2.3.1 — Coronal atlas discrete-color fix**.
+Current version: **2.3.2 — Viewer display, atlas cache, search, and updater improvements**.

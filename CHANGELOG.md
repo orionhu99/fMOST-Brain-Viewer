@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.3.2 — 2026-08-26
+
+- Render minimum-width axons as thin screen-space lines instead of rounded tubes.
+- Use a 20% default brain opacity and an intuitive +X default camera orientation.
+- Store atlas-derived caches under the per-user local application data folder.
+- Build sparse uint32 atlas region bounds without allocations tied to maximum label ID.
+- Preserve background cache exceptions and distinguish them from genuinely absent regions.
+- Show ranked live atlas search results below the brain-region search field.
+- Add Help-menu update checking, release selection, verified installer download, and launch.
+
 All notable public changes to fMOST Brain Viewer are documented here. The public
 history begins with the privacy-reviewed release; internal development history
 and project-specific details are intentionally excluded.

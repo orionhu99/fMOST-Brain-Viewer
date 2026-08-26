@@ -83,6 +83,9 @@ CACHE_ROOT = CACHE_BASE
 LOG_DIR = LOCAL_APP_DATA / "fMOST Brain Viewer" / "logs"
 LOG_PATH = LOG_DIR / "fmost-brain-viewer.log"
 LOGGER = logging.getLogger("fmost_brain_viewer")
+GITHUB_RELEASES_API = (
+    "https://api.github.com/repos/orionhu99/fMOST-Brain-Viewer/releases"
+)
 EXPORT_CONTENT_LABELS = {
     "brain": "3D brain atlas",
     "slice": "Coronal annotation slice",
@@ -152,6 +155,86 @@ def region_search_matches(ontology: dict[int, dict], query: str) -> list[int]:
             ranked.append((key, entry[0]))
     ranked.sort()
     return [region_id for _key, region_id in ranked]
+
+
+def version_tuple(value: str) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", value.strip())
+    return tuple(map(int, match.groups())) if match else None
+
+
+def newer_stable_releases(payload, current_version: str) -> list[dict]:
+    """Return newer, published stable releases in descending version order."""
+    current = version_tuple(current_version)
+    if current is None:
+        raise ValueError(f"Invalid current version: {current_version}")
+    releases = []
+    for release in payload:
+        version = version_tuple(str(release.get("tag_name", "")))
+        if (
+            version is not None
+            and version > current
+            and not release.get("draft", False)
+            and not release.get("prerelease", False)
+        ):
+            releases.append((version, release))
+    releases.sort(key=lambda entry: entry[0], reverse=True)
+    return [release for _version, release in releases]
+
+
+def release_installer_asset(release: dict) -> dict | None:
+    version = version_tuple(str(release.get("tag_name", "")))
+    if version is None:
+        return None
+    expected = f"fMOST-Brain-Viewer-Setup-{'.'.join(map(str, version))}-win64.exe"
+    return next(
+        (asset for asset in release.get("assets", []) if asset.get("name") == expected),
+        None,
+    )
+
+
+def fetch_github_releases() -> list[dict]:
+    request = urllib.request.Request(
+        GITHUB_RELEASES_API,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"fMOST-Brain-Viewer/{__version__}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.load(response)
+
+
+def download_release_asset(asset: dict, destination: Path, progress_callback=None) -> Path:
+    """Download one GitHub release asset atomically and verify its digest."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    request = urllib.request.Request(
+        str(asset["browser_download_url"]),
+        headers={"User-Agent": f"fMOST-Brain-Viewer/{__version__}"},
+    )
+    digest = hashlib.sha256()
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as stream:
+            total = int(response.headers.get("Content-Length", asset.get("size", 0)))
+            downloaded = 0
+            while True:
+                block = response.read(1024 * 1024)
+                if not block:
+                    break
+                stream.write(block)
+                digest.update(block)
+                downloaded += len(block)
+                if progress_callback is not None:
+                    progress_callback(downloaded, total)
+        expected = str(asset.get("digest", ""))
+        if expected.startswith("sha256:") and digest.hexdigest() != expected[7:].casefold():
+            raise ValueError("Downloaded installer SHA-256 does not match GitHub metadata.")
+        temporary.replace(destination)
+        return destination
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def configure_logging() -> Path:
@@ -2048,6 +2131,44 @@ class RecordGifDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class UpdateDialog(QtWidgets.QDialog):
+    def __init__(self, releases: list[dict], parent=None):
+        super().__init__(parent)
+        self.releases = releases
+        self.setWindowTitle("Update fMOST Brain Viewer")
+        self.setWindowIcon(QtGui.QIcon(str(APP_ICON)))
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(QtWidgets.QLabel(
+            f"Installed version: {__version__}\nChoose a newer version:"
+        ))
+        self.version_combo = QtWidgets.QComboBox()
+        for release in releases:
+            tag = str(release["tag_name"]).removeprefix("v")
+            title = str(release.get("name") or release["tag_name"])
+            self.version_combo.addItem(f"{tag} — {title}", release)
+        layout.addWidget(self.version_combo)
+        note = QtWidgets.QLabel(
+            "The installer replaces only application files. Atlas data, projects, "
+            "sessions, caches, and user settings are preserved."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        self.release_button = buttons.addButton(
+            "View release page", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole
+        )
+        self.install_button = buttons.addButton(
+            "Download and install", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        buttons.rejected.connect(self.reject)
+        self.install_button.clicked.connect(self.accept)
+        layout.addWidget(buttons)
+        self.resize(560, 180)
+
+    def selected_release(self) -> dict:
+        return self.version_combo.currentData()
+
+
 class ViewerWindow(QtWidgets.QMainWindow):
     def __init__(
         self,
@@ -2287,6 +2408,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
             lambda _checked=False: self._set_brain_style("Volume")
         )
         self.help_menu = self.menuBar().addMenu("Help")
+        update_action = self.help_menu.addAction("Check for updates...")
+        update_action.triggered.connect(self._check_for_updates)
+        self.help_menu.addSeparator()
         log_action = self.help_menu.addAction("Open log folder")
         log_action.triggered.connect(self._open_log_folder)
         self.help_menu.addSeparator()
@@ -2584,6 +2708,83 @@ class ViewerWindow(QtWidgets.QMainWindow):
         )
         dialog.setTextFormat(QtCore.Qt.TextFormat.RichText)
         dialog.exec()
+
+    def _check_for_updates(self) -> None:
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            releases = newer_stable_releases(fetch_github_releases(), __version__)
+        except Exception as exc:
+            LOGGER.exception("Could not check for application updates")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Update check failed",
+                f"{type(exc).__name__}: {exc}\n\nCheck your internet connection or use the "
+                "GitHub Releases page.",
+            )
+            return
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if not releases:
+            QtWidgets.QMessageBox.information(
+                self, "No update available", f"Version {__version__} is up to date."
+            )
+            return
+        dialog = UpdateDialog(releases, self)
+        dialog.release_button.clicked.connect(
+            lambda: QtGui.QDesktopServices.openUrl(
+                QtCore.QUrl(str(dialog.selected_release().get("html_url", "")))
+            )
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        release = dialog.selected_release()
+        asset = release_installer_asset(release)
+        if asset is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Installer unavailable",
+                "This release does not contain the expected Windows installer. "
+                "Open its release page to download manually.",
+            )
+            return
+        destination = (
+            LOCAL_APP_DATA / "fMOST Brain Viewer" / "updates" / str(asset["name"])
+        )
+        progress = QtWidgets.QProgressDialog(
+            "Downloading update...", "Cancel", 0, max(int(asset.get("size", 0)), 1), self
+        )
+        progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+
+        def report(downloaded: int, total: int) -> None:
+            progress.setMaximum(max(total, 1))
+            progress.setValue(downloaded)
+            QtWidgets.QApplication.processEvents()
+            if progress.wasCanceled():
+                raise AtlasSetupCancelled("Update download cancelled.")
+
+        try:
+            installer = download_release_asset(asset, destination, report)
+        except AtlasSetupCancelled:
+            progress.close()
+            return
+        except Exception as exc:
+            progress.close()
+            LOGGER.exception("Could not download application update")
+            QtWidgets.QMessageBox.critical(
+                self, "Update download failed", f"{type(exc).__name__}: {exc}"
+            )
+            return
+        progress.close()
+        launched = QtCore.QProcess.startDetached(str(installer), [])
+        if isinstance(launched, tuple):
+            launched = launched[0]
+        if not launched:
+            QtWidgets.QMessageBox.critical(
+                self, "Cannot start installer", f"Run this file manually:\n{installer}"
+            )
+            return
+        QtWidgets.QApplication.quit()
 
     def _open_log_folder(self) -> None:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
