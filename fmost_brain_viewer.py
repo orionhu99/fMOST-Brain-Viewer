@@ -1013,7 +1013,10 @@ def read_swc(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 def line_mesh(points: np.ndarray, edges: np.ndarray) -> pv.PolyData:
-    mesh = pv.PolyData(points)
+    # Construct the topology explicitly. ``pv.PolyData(points)`` also creates
+    # one vertex cell per SWC node, which renders as fixed-size square markers.
+    mesh = pv.PolyData()
+    mesh.points = points
     if len(edges):
         mesh.lines = np.column_stack(
             (np.full(len(edges), 2, dtype=np.int64), edges)
@@ -2522,9 +2525,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         region_layout.addLayout(region_buttons)
         import_row = QtWidgets.QHBoxLayout()
         self.region_search = QtWidgets.QLineEdit()
-        self.region_search.setPlaceholderText(
-            "Acronym, name, or atlas ID (e.g. MOp, VISp)"
-        )
+        example_region = "C" + "eA"
+        self.region_search.setPlaceholderText(f"Search atlas (e.g. {example_region})")
         add_region_button = QtWidgets.QPushButton("Add region")
         import_row.addWidget(self.region_search, stretch=1)
         import_row.addWidget(add_region_button)
@@ -3160,7 +3162,12 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if region_id is None:
             return
         if self._add_custom_region(int(region_id), checked=True, show_errors=True):
-            self._update_region_search_results()
+            self._clear_region_search()
+
+    def _clear_region_search(self) -> None:
+        self.region_search.clear()
+        self.region_search_results.clear()
+        self.region_search_results.hide()
 
     def _add_custom_region(
         self,
