@@ -76,13 +76,15 @@ manual region corrections, and import diagnostics.
 - Show a smooth whole-brain Surface by default; load the 25 µm Volume on demand.
 - Navigate the 10 µm annotation along the anterior–posterior axis.
 - Select neurons individually or group them by soma region.
-- Highlight any atlas structure by acronym, name, or Allen structure ID; try
-  general examples such as `MOp` or `VISp`.
+- Search atlas structures live by acronym, name, or Allen structure ID, then
+  add the highlighted result by keyboard or mouse.
+- Render only the connected SWC line topology, without fixed-size node markers.
 - Keep soma display independent or strictly bound to visible axons.
 - Save and reopen multi-dataset `.fmost-session.json` sessions.
 - Export TIFF, PNG, JPEG, or BMP captures and looping rotating GIFs.
 - Limit hidden axon actor caching to reduce memory growth during long sessions.
-- Check GitHub Releases from the Help menu and install a selected newer version.
+- Check GitHub Releases in the background from the Help menu and install a
+  selected, SHA-256-verified newer version.
 
 ## Privacy and data handling
 
