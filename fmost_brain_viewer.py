@@ -1070,10 +1070,14 @@ def load_manual_soma_regions(
 def _flatten_ontology(nodes: list[dict], output: dict[int, dict]) -> None:
     for node in nodes:
         children = node.get("children", [])
+        color = str(node.get("color_hex_triplet", "")).strip().lstrip("#")
         output[int(node["id"])] = {
             "acronym": node.get("acronym", str(node["id"])),
             "name": node.get("name", "Unknown structure"),
             "children": [int(child["id"]) for child in children],
+            "color_hex_triplet": color.upper()
+            if re.fullmatch(r"[0-9a-fA-F]{6}", color)
+            else None,
         }
         _flatten_ontology(children, output)
 
@@ -1121,6 +1125,49 @@ def deterministic_color(key: int | str) -> str:
         hue = (key * 0.618033988749895) % 1.0
     red, green, blue = colorsys.hsv_to_rgb(hue, 0.72, 0.96)
     return f"#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}"
+
+
+def region_rgba(region_id: int, ontology: dict[int, dict]) -> tuple[int, int, int, int]:
+    """Return an opaque discrete atlas color, with transparent background ID 0."""
+    if region_id == 0:
+        return 0, 0, 0, 0
+    color = ontology.get(region_id, {}).get("color_hex_triplet")
+    if not isinstance(color, str) or not re.fullmatch(r"[0-9A-Fa-f]{6}", color):
+        color = deterministic_color(region_id).lstrip("#")
+    red, green, blue = (int(color[offset:offset + 2], 16) for offset in (0, 2, 4))
+    return red, green, blue, 255
+
+
+def annotation_slice_rgba(
+    labels: np.ndarray, ontology: dict[int, dict]
+) -> np.ndarray:
+    """Map a 2D categorical annotation slice to stable, non-interpolated RGBA."""
+    region_ids, inverse = np.unique(labels, return_inverse=True)
+    palette = np.array(
+        [region_rgba(int(region_id), ontology) for region_id in region_ids],
+        dtype=np.uint8,
+    )
+    return palette[inverse].reshape(*labels.shape, 4)
+
+
+def annotation_slice_grid(
+    labels: np.ndarray,
+    spacing: tuple[float, float],
+    position_um: float,
+    ontology: dict[int, dict],
+) -> pv.ImageData:
+    """Build a cell-colored coronal plane whose cell centers match annotation pixels."""
+    if labels.ndim != 2:
+        raise ValueError("Annotation slice must be a 2D array.")
+    spacing_x, spacing_y = spacing
+    plane = pv.ImageData(
+        dimensions=(labels.shape[0] + 1, labels.shape[1] + 1, 1),
+        spacing=(spacing_x, spacing_y, 1),
+        origin=(-spacing_x / 2, -spacing_y / 2, position_um),
+    )
+    rgba = annotation_slice_rgba(labels, ontology)
+    plane.cell_data["region_rgba"] = rgba.transpose(1, 0, 2).reshape(-1, 4)
+    return plane
 
 
 def infer_neuron_soma_id(
@@ -2898,16 +2945,16 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.slice_label.setText(
             f"Slice {index}/{self.annotation.shape[2] - 1}   Z = {position_um:.0f} um"
         )
-        plane = pv.ImageData(
-            dimensions=(self.annotation.shape[0], self.annotation.shape[1], 1),
-            spacing=(self.annotation.spacing[0], self.annotation.spacing[1], 1),
-            origin=(0, 0, position_um),
+        plane = annotation_slice_grid(
+            self.annotation.coronal(index),
+            self.annotation.spacing[:2],
+            position_um,
+            self.ontology,
         )
-        plane.point_data["region_id"] = self.annotation.coronal(index).ravel(order="F")
         if self.slice_actor is not None:
             self.plotter.remove_actor(self.slice_actor, render=False)
         self.slice_actor = self.plotter.add_mesh(
-            plane, scalars="region_id", cmap="turbo", opacity=0.72,
+            plane, scalars="region_rgba", rgba=True, opacity=0.72,
             show_scalar_bar=False, name="annotation_slice", render=False,
         )
         self.slice_actor.SetVisibility(self.slice_check.isChecked())

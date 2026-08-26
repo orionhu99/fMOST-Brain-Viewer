@@ -4,6 +4,17 @@ All notable public changes to fMOST Brain Viewer are documented here. The public
 history begins with the privacy-reviewed release; internal development history
 and project-specific details are intentionally excluded.
 
+## 2.3.1 — 2026-08-26
+
+### Fixed
+
+- Rendered coronal annotation slices with discrete Allen ontology colors instead
+  of a continuous scalar colormap.
+- Made background label 0 fully transparent and removed interpolated colors at
+  atlas-region boundaries.
+- Added stable fallback colors for unknown region IDs while preserving slice
+  geometry and world coordinates.
+
 ## 2.3.0 — 2026-08-22
 
 ### Initial public release
