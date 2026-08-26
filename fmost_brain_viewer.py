@@ -34,13 +34,15 @@ DATA_ROOT = Path.home()
 ATLAS_ROOT = Path()
 TEMPLATE_25 = ATLAS_ROOT / "average_template_25.nrrd"
 ANNOTATION_10 = ATLAS_ROOT / "annotation_10.nrrd"
-CACHE_ROOT = ATLAS_ROOT / "viewer_cache"
+CACHE_ROOT = Path()
 ATLAS_ANNOTATION_SOURCE = ANNOTATION_10
 ATLAS_SIGNATURE = ""
 ATLAS_LABEL_MAX = 1500
 UNASSIGNED_COLOR = "#888888"
 ACTIVE_PROJECT: Path | None = None
-REGION_CACHE_VERSION = 2
+REGION_CACHE_VERSION = 3
+DEFAULT_BRAIN_OPACITY = 0.20
+DEFAULT_RENDER_LINES_AS_TUBES = False
 MAX_HIDDEN_AXON_ACTORS = 64
 MAX_HIDDEN_AXON_POINTS = 2_000_000
 ATLAS_TEMPLATE_NAME = "average_template_25.nrrd"
@@ -76,9 +78,14 @@ APP_LOGO = ASSET_ROOT / "fmost_brain_logo.png"
 ATLAS_MANIFEST_PATH = RESOURCE_ROOT / "atlas_manifest.json"
 BUNDLED_ONTOLOGY_PATH = RESOURCE_ROOT / "allen_structure_graph_1.json"
 LOCAL_APP_DATA = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+CACHE_BASE = LOCAL_APP_DATA / "fMOST Brain Viewer" / "cache" / "atlas"
+CACHE_ROOT = CACHE_BASE
 LOG_DIR = LOCAL_APP_DATA / "fMOST Brain Viewer" / "logs"
 LOG_PATH = LOG_DIR / "fmost-brain-viewer.log"
 LOGGER = logging.getLogger("fmost_brain_viewer")
+GITHUB_RELEASES_API = (
+    "https://api.github.com/repos/orionhu99/fMOST-Brain-Viewer/releases"
+)
 EXPORT_CONTENT_LABELS = {
     "brain": "3D brain atlas",
     "slice": "Coronal annotation slice",
@@ -92,6 +99,142 @@ EXPORT_CONTENT_LABELS = {
 
 class AtlasSetupCancelled(Exception):
     pass
+
+
+def derived_cache_root(signature: str) -> Path:
+    """Return the per-user cache namespace for one exact atlas identity."""
+    return CACHE_BASE / f"derived_{signature[:20]}"
+
+
+def valid_camera_position(camera) -> bool:
+    """Accept only finite, non-degenerate PyVista camera triplets."""
+    try:
+        vectors = np.asarray(camera, dtype=float)
+    except (TypeError, ValueError):
+        return False
+    if vectors.shape != (3, 3) or not np.isfinite(vectors).all():
+        return False
+    direction = vectors[1] - vectors[0]
+    view_up = vectors[2]
+    return (
+        np.linalg.norm(direction) > 1e-9
+        and np.linalg.norm(view_up) > 1e-9
+        and np.linalg.norm(np.cross(direction, view_up)) > 1e-9
+    )
+
+
+def region_search_matches(ontology: dict[int, dict], query: str) -> list[int]:
+    """Rank atlas matches predictably without depending on dictionary order."""
+    text = query.strip().casefold()
+    if not text:
+        return []
+
+    def rank(entry):
+        region_id, info = entry
+        acronym = str(info.get("acronym", "")).casefold()
+        name = str(info.get("name", "")).casefold()
+        words = re.findall(r"[\w]+", name)
+        if text.isdigit() and int(text) == region_id:
+            category = 0
+        elif text == acronym:
+            category = 1
+        elif acronym.startswith(text):
+            category = 2
+        elif any(word.startswith(text) for word in words):
+            category = 3
+        elif text in acronym or text in name:
+            category = 4
+        else:
+            return None
+        return category, acronym, name, region_id
+
+    ranked = []
+    for entry in ontology.items():
+        key = rank(entry)
+        if key is not None:
+            ranked.append((key, entry[0]))
+    ranked.sort()
+    return [region_id for _key, region_id in ranked]
+
+
+def version_tuple(value: str) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", value.strip())
+    return tuple(map(int, match.groups())) if match else None
+
+
+def newer_stable_releases(payload, current_version: str) -> list[dict]:
+    """Return newer, published stable releases in descending version order."""
+    current = version_tuple(current_version)
+    if current is None:
+        raise ValueError(f"Invalid current version: {current_version}")
+    releases = []
+    for release in payload:
+        version = version_tuple(str(release.get("tag_name", "")))
+        if (
+            version is not None
+            and version > current
+            and not release.get("draft", False)
+            and not release.get("prerelease", False)
+        ):
+            releases.append((version, release))
+    releases.sort(key=lambda entry: entry[0], reverse=True)
+    return [release for _version, release in releases]
+
+
+def release_installer_asset(release: dict) -> dict | None:
+    version = version_tuple(str(release.get("tag_name", "")))
+    if version is None:
+        return None
+    expected = f"fMOST-Brain-Viewer-Setup-{'.'.join(map(str, version))}-win64.exe"
+    return next(
+        (asset for asset in release.get("assets", []) if asset.get("name") == expected),
+        None,
+    )
+
+
+def fetch_github_releases() -> list[dict]:
+    request = urllib.request.Request(
+        GITHUB_RELEASES_API,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"fMOST-Brain-Viewer/{__version__}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.load(response)
+
+
+def download_release_asset(asset: dict, destination: Path, progress_callback=None) -> Path:
+    """Download one GitHub release asset atomically and verify its digest."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    request = urllib.request.Request(
+        str(asset["browser_download_url"]),
+        headers={"User-Agent": f"fMOST-Brain-Viewer/{__version__}"},
+    )
+    digest = hashlib.sha256()
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as stream:
+            total = int(response.headers.get("Content-Length", asset.get("size", 0)))
+            downloaded = 0
+            while True:
+                block = response.read(1024 * 1024)
+                if not block:
+                    break
+                stream.write(block)
+                digest.update(block)
+                downloaded += len(block)
+                if progress_callback is not None:
+                    progress_callback(downloaded, total)
+        expected = str(asset.get("digest", ""))
+        if expected.startswith("sha256:") and digest.hexdigest() != expected[7:].casefold():
+            raise ValueError("Downloaded installer SHA-256 does not match GitHub metadata.")
+        temporary.replace(destination)
+        return destination
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def configure_logging() -> Path:
@@ -708,7 +851,7 @@ def activate_atlas(folder: Path, parent=None) -> None:
     # All derived surfaces/libraries live in an atlas-identity namespace. This
     # prevents a replaced annotation from reusing an older VTP merely because
     # its size and timestamp happen to match.
-    CACHE_ROOT = folder / "viewer_cache" / f"derived_{signature[:20]}"
+    CACHE_ROOT = derived_cache_root(signature)
     settings = QtCore.QSettings("LiBoLab", "fMOSTBrainViewer")
     settings.setValue("atlas_directory", str(folder))
     settings.setValue("atlas_signature", signature)
@@ -1303,9 +1446,40 @@ def load_or_create_structure_surface(
     origin = (lower + local_lower - 1) * np.asarray(spacing)
     surface = _surface_from_mask(padded, spacing, origin)
     temporary = cache.with_name(cache.stem + ".part.vtp")
-    surface.save(temporary)
-    temporary.replace(cache)
+    try:
+        surface.save(temporary)
+        temporary.replace(cache)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
     return surface
+
+
+def sparse_label_bounds(labels: np.ndarray, is_background, chunk_depth: int = 16):
+    """Find sparse uint32 label bounds without allocating up to max(region_id)."""
+    bounds: dict[str, list[int]] = {}
+    for start in range(0, labels.shape[2], chunk_depth):
+        stop = min(start + chunk_depth, labels.shape[2])
+        chunk = np.asarray(labels[:, :, start:stop])
+        values, inverse = np.unique(chunk, return_inverse=True)
+        compact = inverse.reshape(chunk.shape) + 1
+        for value, slices in zip(values, ndimage.find_objects(compact), strict=True):
+            label = int(value)
+            if slices is None or is_background(label):
+                continue
+            current = [
+                slices[0].start, slices[1].start, slices[2].start + start,
+                slices[0].stop, slices[1].stop, slices[2].stop + start,
+            ]
+            previous = bounds.get(str(label))
+            if previous is not None:
+                current = [
+                    min(previous[0], current[0]), min(previous[1], current[1]),
+                    min(previous[2], current[2]), max(previous[3], current[3]),
+                    max(previous[4], current[4]), max(previous[5], current[5]),
+                ]
+            bounds[str(label)] = current
+    return bounds
 
 
 def load_or_create_region_bounds(annotation: RawNrrdMemmap) -> dict[str, list[int]]:
@@ -1318,17 +1492,7 @@ def load_or_create_region_bounds(annotation: RawNrrdMemmap) -> dict[str, list[in
         except (OSError, ValueError, KeyError, TypeError):
             pass
     labels = annotation.world_labels(2)
-    objects = ndimage.find_objects(labels)
-    bounds: dict[str, list[int]] = {}
-    for value, slices in enumerate(objects, 1):
-        if slices is None:
-            continue
-        if annotation.is_background(value):
-            continue
-        bounds[str(value)] = [
-            slices[0].start, slices[1].start, slices[2].start,
-            slices[0].stop, slices[1].stop, slices[2].stop,
-        ]
+    bounds = sparse_label_bounds(labels, annotation.is_background)
     payload = {
         "version": REGION_CACHE_VERSION,
         "annotation_size": annotation.path.stat().st_size,
@@ -1336,8 +1500,12 @@ def load_or_create_region_bounds(annotation: RawNrrdMemmap) -> dict[str, list[in
         "bounds": bounds,
     }
     temporary = cache.with_suffix(".part.json")
-    temporary.write_text(json.dumps(payload), encoding="utf-8")
-    temporary.replace(cache)
+    try:
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        temporary.replace(cache)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
     return bounds
 
 
@@ -1377,15 +1545,19 @@ def prepare_region_library(
         del surface
     manifest = CACHE_ROOT / f"region_library_{mode}_v{REGION_CACHE_VERSION}.json"
     temporary = manifest.with_suffix(".part.json")
-    temporary.write_text(json.dumps({
-        "version": REGION_CACHE_VERSION,
-        "mode": mode,
-        "annotation_size": annotation.path.stat().st_size,
-        "annotation_mtime_ns": annotation.path.stat().st_mtime_ns,
-        "completed": completed,
-        "total": len(ids),
-    }, indent=2), encoding="utf-8")
-    temporary.replace(manifest)
+    try:
+        temporary.write_text(json.dumps({
+            "version": REGION_CACHE_VERSION,
+            "mode": mode,
+            "annotation_size": annotation.path.stat().st_size,
+            "annotation_mtime_ns": annotation.path.stat().st_mtime_ns,
+            "completed": completed,
+            "total": len(ids),
+        }, indent=2), encoding="utf-8")
+        temporary.replace(manifest)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
     if progress_callback is not None:
         progress_callback(len(ids), len(ids), "Complete")
     return completed, len(ids)
@@ -1404,6 +1576,7 @@ class RegionCacheWorker(QtCore.QObject):
         self.region_id = region_id
         self.cancel_requested = False
         self.result = None
+        self.error: Exception | None = None
 
     @QtCore.Slot()
     def run(self) -> None:
@@ -1426,10 +1599,13 @@ class RegionCacheWorker(QtCore.QObject):
                     lambda: self.cancel_requested,
                 )
             self.succeeded.emit()
-        except AtlasSetupCancelled:
+        except AtlasSetupCancelled as exc:
+            self.error = exc
             self.failed.emit("Preparation cancelled. Completed cache files were kept.")
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.error = exc
+            LOGGER.exception("Region cache preparation failed")
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
 class RegionProgressController(QtCore.QObject):
@@ -1488,13 +1664,12 @@ def run_region_cache_job(
         thread.quit()
     thread.wait()
     result = worker.result
+    error = worker.error
     del controller
     del worker
     thread.deleteLater()
-    if not outcome["ok"] and outcome["error"] and not outcome["error"].startswith(
-        "Preparation cancelled"
-    ):
-        QtWidgets.QMessageBox.critical(parent, f"{title} failed", outcome["error"])
+    if error is not None and not isinstance(error, AtlasSetupCancelled):
+        raise error
     return result if outcome["ok"] else None
 
 
@@ -1956,6 +2131,44 @@ class RecordGifDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class UpdateDialog(QtWidgets.QDialog):
+    def __init__(self, releases: list[dict], parent=None):
+        super().__init__(parent)
+        self.releases = releases
+        self.setWindowTitle("Update fMOST Brain Viewer")
+        self.setWindowIcon(QtGui.QIcon(str(APP_ICON)))
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(QtWidgets.QLabel(
+            f"Installed version: {__version__}\nChoose a newer version:"
+        ))
+        self.version_combo = QtWidgets.QComboBox()
+        for release in releases:
+            tag = str(release["tag_name"]).removeprefix("v")
+            title = str(release.get("name") or release["tag_name"])
+            self.version_combo.addItem(f"{tag} — {title}", release)
+        layout.addWidget(self.version_combo)
+        note = QtWidgets.QLabel(
+            "The installer replaces only application files. Atlas data, projects, "
+            "sessions, caches, and user settings are preserved."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        self.release_button = buttons.addButton(
+            "View release page", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole
+        )
+        self.install_button = buttons.addButton(
+            "Download and install", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        buttons.rejected.connect(self.reject)
+        self.install_button.clicked.connect(self.accept)
+        layout.addWidget(buttons)
+        self.resize(560, 180)
+
+    def selected_release(self) -> dict:
+        return self.version_combo.currentData()
+
+
 class ViewerWindow(QtWidgets.QMainWindow):
     def __init__(
         self,
@@ -2170,6 +2383,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         )
         self.mouse_wheel_action.toggled.connect(self._set_parameter_mouse_wheel)
         brain_rendering_menu = settings_menu.addMenu("3D brain rendering")
+        reset_view_action = settings_menu.addAction("Reset default brain view")
+        reset_view_action.triggered.connect(self._reset_default_view)
         self.brain_rendering_group = QtGui.QActionGroup(self)
         self.brain_rendering_group.setExclusive(True)
         self.surface_rendering_action = brain_rendering_menu.addAction(
@@ -2193,6 +2408,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
             lambda _checked=False: self._set_brain_style("Volume")
         )
         self.help_menu = self.menuBar().addMenu("Help")
+        update_action = self.help_menu.addAction("Check for updates...")
+        update_action.triggered.connect(self._check_for_updates)
+        self.help_menu.addSeparator()
         log_action = self.help_menu.addAction("Open log folder")
         log_action.triggered.connect(self._open_log_folder)
         self.help_menu.addSeparator()
@@ -2283,7 +2501,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
 
         appearance_group = QtWidgets.QGroupBox("Appearance")
         appearance_layout = QtWidgets.QFormLayout(appearance_group)
-        self.template_opacity = self._spinbox(0.0, 1.0, 0.05, 0.35, 2)
+        self.template_opacity = self._spinbox(
+            0.0, 1.0, 0.05, DEFAULT_BRAIN_OPACITY, 2
+        )
         appearance_layout.addRow("3D brain opacity", self.template_opacity)
         self.axon_width = self._spinbox(1.0, 10.0, 0.5, 1.0, 1)
         appearance_layout.addRow("Axon thickness (px)", self.axon_width)
@@ -2309,6 +2529,10 @@ class ViewerWindow(QtWidgets.QMainWindow):
         import_row.addWidget(self.region_search, stretch=1)
         import_row.addWidget(add_region_button)
         region_layout.addLayout(import_row)
+        self.region_search_results = QtWidgets.QListWidget()
+        self.region_search_results.setMaximumHeight(170)
+        self.region_search_results.hide()
+        region_layout.addWidget(self.region_search_results)
         self.region_list = QtWidgets.QListWidget()
         list_row_height = self.region_list.fontMetrics().height() + 8
         four_rows_height = list_row_height * 4 + 2 * self.region_list.frameWidth() + 2
@@ -2394,7 +2618,11 @@ class ViewerWindow(QtWidgets.QMainWindow):
         region_all.clicked.connect(lambda: self._check_all_regions(True))
         region_none.clicked.connect(lambda: self._check_all_regions(False))
         add_region_button.clicked.connect(self._add_region_from_search)
-        self.region_search.returnPressed.connect(self._add_region_from_search)
+        self.region_search.textEdited.connect(self._update_region_search_results)
+        self.region_search_results.itemDoubleClicked.connect(
+            lambda _item: self._add_region_from_search()
+        )
+        self.region_search.installEventFilter(self)
         axon_all.clicked.connect(lambda: self._check_all_neurons(True))
         axon_none.clicked.connect(lambda: self._check_all_neurons(False))
         add_dataset_button.clicked.connect(self._add_brain_datasets)
@@ -2411,6 +2639,21 @@ class ViewerWindow(QtWidgets.QMainWindow):
             widget.installEventFilter(self)
 
     def eventFilter(self, watched, event):
+        if watched is getattr(self, "region_search", None) and event.type() == QtCore.QEvent.Type.KeyPress:
+            key = event.key()
+            if key in (QtCore.Qt.Key.Key_Down, QtCore.Qt.Key.Key_Up):
+                count = self.region_search_results.count()
+                if count:
+                    step = 1 if key == QtCore.Qt.Key.Key_Down else -1
+                    row = max(0, min(count - 1, self.region_search_results.currentRow() + step))
+                    self.region_search_results.setCurrentRow(row)
+                return True
+            if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                self._add_region_from_search()
+                return True
+            if key == QtCore.Qt.Key.Key_Escape:
+                self.region_search_results.hide()
+                return True
         if (
             event.type() == QtCore.QEvent.Type.Wheel
             and isinstance(
@@ -2465,6 +2708,83 @@ class ViewerWindow(QtWidgets.QMainWindow):
         )
         dialog.setTextFormat(QtCore.Qt.TextFormat.RichText)
         dialog.exec()
+
+    def _check_for_updates(self) -> None:
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            releases = newer_stable_releases(fetch_github_releases(), __version__)
+        except Exception as exc:
+            LOGGER.exception("Could not check for application updates")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Update check failed",
+                f"{type(exc).__name__}: {exc}\n\nCheck your internet connection or use the "
+                "GitHub Releases page.",
+            )
+            return
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if not releases:
+            QtWidgets.QMessageBox.information(
+                self, "No update available", f"Version {__version__} is up to date."
+            )
+            return
+        dialog = UpdateDialog(releases, self)
+        dialog.release_button.clicked.connect(
+            lambda: QtGui.QDesktopServices.openUrl(
+                QtCore.QUrl(str(dialog.selected_release().get("html_url", "")))
+            )
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        release = dialog.selected_release()
+        asset = release_installer_asset(release)
+        if asset is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Installer unavailable",
+                "This release does not contain the expected Windows installer. "
+                "Open its release page to download manually.",
+            )
+            return
+        destination = (
+            LOCAL_APP_DATA / "fMOST Brain Viewer" / "updates" / str(asset["name"])
+        )
+        progress = QtWidgets.QProgressDialog(
+            "Downloading update...", "Cancel", 0, max(int(asset.get("size", 0)), 1), self
+        )
+        progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+
+        def report(downloaded: int, total: int) -> None:
+            progress.setMaximum(max(total, 1))
+            progress.setValue(downloaded)
+            QtWidgets.QApplication.processEvents()
+            if progress.wasCanceled():
+                raise AtlasSetupCancelled("Update download cancelled.")
+
+        try:
+            installer = download_release_asset(asset, destination, report)
+        except AtlasSetupCancelled:
+            progress.close()
+            return
+        except Exception as exc:
+            progress.close()
+            LOGGER.exception("Could not download application update")
+            QtWidgets.QMessageBox.critical(
+                self, "Update download failed", f"{type(exc).__name__}: {exc}"
+            )
+            return
+        progress.close()
+        launched = QtCore.QProcess.startDetached(str(installer), [])
+        if isinstance(launched, tuple):
+            launched = launched[0]
+        if not launched:
+            QtWidgets.QMessageBox.critical(
+                self, "Cannot start installer", f"Run this file manually:\n{installer}"
+            )
+            return
+        QtWidgets.QApplication.quit()
 
     def _open_log_folder(self) -> None:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -2623,7 +2943,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
             line_mesh(points, edges),
             color=self.manual_colors[key],
             line_width=self.axon_width.value(),
-            render_lines_as_tubes=True,
+            render_lines_as_tubes=DEFAULT_RENDER_LINES_AS_TUBES,
             name=f"axon_{len(self.axon_actors)}",
             render=False,
         )
@@ -2754,8 +3074,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self._update_slice(self.slice_slider.value())
         self._update_region_legend()
         self._report_progress(96, "Finishing the 3D scene...")
-        self.plotter.camera_position = "iso"
-        self.plotter.reset_camera()
+        self._reset_default_view(render=False)
         self.status.setText(
             f"Ready: {len(self.datasets)} brains; {len(self.neuron_items)} neurons; "
             f"{sum(dataset.matched_axon_count for dataset in self.datasets.values())} matched, "
@@ -2802,47 +3121,46 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.region_items[region_id] = item
 
     def _region_matches(self, query: str) -> list[int]:
-        text = query.strip().casefold()
-        if not text:
-            return []
-        if text.isdigit() and int(text) in self.ontology:
-            return [int(text)]
-        exact = [
-            region_id
-            for region_id, info in self.ontology.items()
-            if text in (str(info["acronym"]).casefold(), str(info["name"]).casefold())
-        ]
-        if exact:
-            return sorted(exact)
-        partial = [
-            region_id
-            for region_id, info in self.ontology.items()
-            if text in str(info["acronym"]).casefold()
-            or text in str(info["name"]).casefold()
-        ]
-        return sorted(partial, key=lambda value: self.ontology[value]["acronym"])
+        return region_search_matches(self.ontology, query)
+
+    def _update_region_search_results(self, _text: str = "") -> None:
+        matches = self._region_matches(self.region_search.text())
+        self.region_search_results.clear()
+        if not self.region_search.text().strip():
+            self.region_search_results.hide()
+            return
+        for region_id in matches[:50]:
+            info = self.ontology[region_id]
+            suffix = "  [Added]" if region_id in self.region_items else ""
+            item = QtWidgets.QListWidgetItem(
+                f"{info['acronym']} — {info['name']}  [ID {region_id}]{suffix}"
+            )
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, region_id)
+            self.region_search_results.addItem(item)
+        if len(matches) > 50:
+            item = QtWidgets.QListWidgetItem(f"… {len(matches) - 50} more matches")
+            item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEnabled)
+            self.region_search_results.addItem(item)
+        if not matches:
+            item = QtWidgets.QListWidgetItem("No matching Allen atlas structure")
+            item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEnabled)
+            self.region_search_results.addItem(item)
+        elif self.region_search_results.count():
+            self.region_search_results.setCurrentRow(0)
+        self.region_search_results.show()
 
     def _add_region_from_search(self) -> None:
-        matches = self._region_matches(self.region_search.text())
-        if not matches:
-            QtWidgets.QMessageBox.information(
-                self, "No atlas region", "No matching Allen atlas structure was found."
-            )
+        item = self.region_search_results.currentItem()
+        if item is None:
+            self._update_region_search_results()
+            item = self.region_search_results.currentItem()
+        if item is None:
             return
-        region_id = matches[0]
-        if len(matches) > 1:
-            choices = [
-                f"{self.ontology[value]['acronym']} — "
-                f"{self.ontology[value]['name']}  [ID {value}]"
-                for value in matches
-            ]
-            selected, accepted = QtWidgets.QInputDialog.getItem(
-                self, "Choose atlas region", "Matching structures:", choices, 0, False
-            )
-            if not accepted:
-                return
-            region_id = matches[choices.index(selected)]
-        self._add_custom_region(region_id, checked=True, show_errors=True)
+        region_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if region_id is None:
+            return
+        if self._add_custom_region(int(region_id), checked=True, show_errors=True):
+            self._update_region_search_results()
 
     def _add_custom_region(
         self,
@@ -2873,9 +3191,18 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if cache.exists() and cache.stat().st_mtime >= self.annotation.path.stat().st_mtime:
             surface = pv.read(cache)
         else:
-            surface = run_region_cache_job(
-                self, self.annotation, self.ontology, region_id=region_id
-            )
+            try:
+                surface = run_region_cache_job(
+                    self, self.annotation, self.ontology, region_id=region_id
+                )
+            except Exception as exc:
+                if show_errors:
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "Could not prepare brain region",
+                        f"{type(exc).__name__}: {exc}\n\nCache: {CACHE_ROOT}",
+                    )
+                return False
         if surface is None or not surface.n_points:
             if show_errors:
                 QtWidgets.QMessageBox.warning(
@@ -2897,7 +3224,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
         return True
 
     def _restore_config(self) -> None:
-        self.template_opacity.setValue(float(self.config.get("brain_opacity", 0.35)))
+        self.template_opacity.setValue(
+            float(self.config.get("brain_opacity", DEFAULT_BRAIN_OPACITY))
+        )
         self.axon_width.setValue(max(1.0, float(self.config.get("axon_width", 1.0))))
         self.soma_size.setValue(float(self.config.get("soma_size", 10.0)))
         self.region_opacity.setValue(float(self.config.get("region_opacity", 0.55)))
@@ -2936,9 +3265,17 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self._refresh_soma_points(render=False)
         self._update_region_legend(render=False)
         camera = self.config.get("camera_position")
-        if isinstance(camera, list) and len(camera) == 3:
+        if valid_camera_position(camera):
             self.plotter.camera_position = camera
+        else:
+            self._reset_default_view(render=False)
         self.plotter.render()
+
+    def _reset_default_view(self, _checked=False, render=True) -> None:
+        self.plotter.view_vector((1.0, 0.0, 0.0), viewup=(0.0, -1.0, 0.0), render=False)
+        self.plotter.reset_camera(render=False)
+        if render:
+            self.plotter.render()
 
     def _update_slice(self, index: int) -> None:
         position_um = index * self.annotation.spacing[2]
