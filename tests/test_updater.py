@@ -23,6 +23,26 @@ class FakeResponse(io.BytesIO):
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_background_worker_reports_success_and_original_error(self) -> None:
+        successful = []
+        worker = viewer.UpdateCheckWorker()
+        worker.completed.connect(lambda releases, error: successful.append((releases, error)))
+        payload = [{"tag_name": "v2.4.0", "draft": False, "prerelease": False}]
+        with mock.patch.object(viewer, "fetch_github_releases", return_value=payload):
+            worker.run()
+        self.assertEqual(successful[0][0][0]["tag_name"], "v2.4.0")
+        self.assertIsNone(successful[0][1])
+
+        failed = []
+        worker = viewer.UpdateCheckWorker()
+        worker.completed.connect(lambda releases, error: failed.append((releases, error)))
+        with mock.patch.object(
+            viewer, "fetch_github_releases", side_effect=TimeoutError("slow network")
+        ):
+            worker.run()
+        self.assertEqual(failed[0][0], [])
+        self.assertIsInstance(failed[0][1], TimeoutError)
+
     def test_versions_and_release_filtering(self) -> None:
         payload = [
             {"tag_name": "v2.4.0", "draft": False, "prerelease": False},

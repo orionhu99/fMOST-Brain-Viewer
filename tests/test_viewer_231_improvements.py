@@ -38,6 +38,19 @@ class Viewer231ImprovementTests(unittest.TestCase):
         self.assertEqual(results.count(), 0)
         self.assertTrue(results.isHidden())
 
+    def test_region_search_inside_detection_includes_widget_children(self) -> None:
+        search = viewer.QtWidgets.QLineEdit()
+        results = viewer.QtWidgets.QListWidget()
+        outside = viewer.QtWidgets.QPushButton()
+        fake = types.SimpleNamespace(
+            region_search=search, region_search_results=results
+        )
+        self.assertTrue(viewer.ViewerWindow._inside_region_search(fake, search))
+        self.assertTrue(
+            viewer.ViewerWindow._inside_region_search(fake, results.viewport())
+        )
+        self.assertFalse(viewer.ViewerWindow._inside_region_search(fake, outside))
+
     def test_cache_namespace_is_per_user_and_signature_scoped(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory) / "cache" / "atlas"

@@ -15,7 +15,7 @@ rotating GIF export, and reusable sessions.
 
 Python, Git, and a command prompt are **not** required.
 
-1. Download `fMOST-Brain-Viewer-Setup-2.3.2-win64.exe` from the
+1. Download `fMOST-Brain-Viewer-Setup-2.3.3-win64.exe` from the
    [latest release](https://github.com/orionhu99/fMOST-Brain-Viewer/releases/latest).
 2. Double-click the installer and follow the short setup wizard.
 3. Start **fMOST Brain Viewer**. On first launch, download the Allen CCF atlas or
@@ -116,4 +116,4 @@ other dependencies retain their own terms; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Citation metadata are provided
 in [CITATION.cff](CITATION.cff).
 
-Current version: **2.3.2 — Viewer display, atlas cache, search, and updater improvements**.
+Current version: **2.3.3 — Axon topology and responsive interaction fixes**.

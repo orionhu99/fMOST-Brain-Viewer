@@ -2134,6 +2134,18 @@ class RecordGifDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class UpdateCheckWorker(QtCore.QObject):
+    completed = QtCore.Signal(object, object)
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            releases = newer_stable_releases(fetch_github_releases(), __version__)
+            self.completed.emit(releases, None)
+        except Exception as exc:
+            self.completed.emit([], exc)
+
+
 class UpdateDialog(QtWidgets.QDialog):
     def __init__(self, releases: list[dict], parent=None):
         super().__init__(parent)
@@ -2181,6 +2193,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
         session_config: dict | None = None,
     ):
         super().__init__()
+        self.update_check_thread: QtCore.QThread | None = None
+        self.update_check_worker: UpdateCheckWorker | None = None
+        self.update_check_progress: QtWidgets.QProgressDialog | None = None
         self.startup_progress = progress
         self.session_path = session_path
         self.config = (
@@ -2639,8 +2654,17 @@ class ViewerWindow(QtWidgets.QMainWindow):
             wheel_controls.extend(self.findChildren(widget_type))
         for widget in wheel_controls:
             widget.installEventFilter(self)
+        for widget in self.findChildren(QtWidgets.QWidget):
+            widget.installEventFilter(self)
 
     def eventFilter(self, watched, event):
+        if (
+            event.type() == QtCore.QEvent.Type.MouseButtonPress
+            and hasattr(self, "region_search_results")
+            and self.region_search_results.isVisible()
+            and not self._inside_region_search(watched)
+        ):
+            self.region_search_results.hide()
         if watched is getattr(self, "region_search", None) and event.type() == QtCore.QEvent.Type.KeyPress:
             key = event.key()
             if key in (QtCore.Qt.Key.Key_Down, QtCore.Qt.Key.Key_Up):
@@ -2667,6 +2691,14 @@ class ViewerWindow(QtWidgets.QMainWindow):
             event.accept()
             return True
         return super().eventFilter(watched, event)
+
+    def _inside_region_search(self, watched) -> bool:
+        current = watched if isinstance(watched, QtWidgets.QWidget) else None
+        while current is not None:
+            if current in (self.region_search, self.region_search_results):
+                return True
+            current = current.parentWidget()
+        return False
 
     def _set_parameter_mouse_wheel(self, enabled: bool) -> None:
         self.mouse_wheel_parameters_enabled = enabled
@@ -2712,20 +2744,42 @@ class ViewerWindow(QtWidgets.QMainWindow):
         dialog.exec()
 
     def _check_for_updates(self) -> None:
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
-        try:
-            releases = newer_stable_releases(fetch_github_releases(), __version__)
-        except Exception as exc:
-            LOGGER.exception("Could not check for application updates")
+        if self.update_check_thread is not None:
+            self.update_check_progress.show()
+            return
+        self.update_check_progress = QtWidgets.QProgressDialog(
+            "Checking GitHub for updates...", "", 0, 0, self
+        )
+        self.update_check_progress.setCancelButton(None)
+        self.update_check_progress.setWindowModality(QtCore.Qt.WindowModality.NonModal)
+        self.update_check_progress.setMinimumDuration(0)
+        self.update_check_progress.show()
+        self.update_check_thread = QtCore.QThread(self)
+        self.update_check_worker = UpdateCheckWorker()
+        self.update_check_worker.moveToThread(self.update_check_thread)
+        self.update_check_thread.started.connect(self.update_check_worker.run)
+        self.update_check_worker.completed.connect(self._update_check_completed)
+        self.update_check_worker.completed.connect(self.update_check_thread.quit)
+        self.update_check_worker.completed.connect(self.update_check_worker.deleteLater)
+        self.update_check_thread.finished.connect(self._update_check_finished)
+        self.update_check_thread.start()
+
+    @QtCore.Slot(object, object)
+    def _update_check_completed(self, releases, error) -> None:
+        if self.update_check_progress is not None:
+            self.update_check_progress.close()
+        if error is not None:
+            LOGGER.error(
+                "Could not check for application updates",
+                exc_info=(type(error), error, error.__traceback__),
+            )
             QtWidgets.QMessageBox.warning(
                 self,
                 "Update check failed",
-                f"{type(exc).__name__}: {exc}\n\nCheck your internet connection or use the "
+                f"{type(error).__name__}: {error}\n\nCheck your internet connection or use the "
                 "GitHub Releases page.",
             )
             return
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
         if not releases:
             QtWidgets.QMessageBox.information(
                 self, "No update available", f"Version {__version__} is up to date."
@@ -2787,6 +2841,15 @@ class ViewerWindow(QtWidgets.QMainWindow):
             )
             return
         QtWidgets.QApplication.quit()
+
+    @QtCore.Slot()
+    def _update_check_finished(self) -> None:
+        thread = self.update_check_thread
+        self.update_check_worker = None
+        self.update_check_thread = None
+        self.update_check_progress = None
+        if thread is not None:
+            thread.deleteLater()
 
     def _open_log_folder(self) -> None:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -4093,6 +4156,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.session_path is not None:
             self._save_session()
+        if self.update_check_thread is not None and self.update_check_thread.isRunning():
+            self.update_check_thread.quit()
+            self.update_check_thread.wait(16000)
         self.plotter.close()
         event.accept()
 
