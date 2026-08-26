@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.3 — 2026-08-26
+
+- Remove unintended SWC vertex cells so axons render without fixed-size square nodes.
+- Clear and dismiss live atlas search results after a successful region selection.
+- Dismiss atlas search results when clicking elsewhere in the viewer.
+- Run GitHub update checks on a background thread so slow networks do not freeze the UI.
+
 ## 2.3.2 — 2026-08-26
 
 - Render minimum-width axons as thin screen-space lines instead of rounded tubes.

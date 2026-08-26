@@ -13,6 +13,44 @@ import fmost_brain_viewer as viewer
 
 
 class Viewer231ImprovementTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = viewer.QtWidgets.QApplication.instance() or viewer.QtWidgets.QApplication([])
+
+    def test_line_mesh_contains_lines_without_vertex_markers(self) -> None:
+        points = np.zeros((3, 3), dtype=float)
+        edges = np.array([[0, 1], [1, 2]], dtype=np.int64)
+        mesh = viewer.line_mesh(points, edges)
+        self.assertEqual(mesh.n_lines, 2)
+        self.assertEqual(mesh.n_verts, 0)
+        self.assertEqual(mesh.n_cells, 2)
+
+    def test_successful_region_search_can_be_cleared_and_hidden(self) -> None:
+        search = viewer.QtWidgets.QLineEdit("TEST")
+        results = viewer.QtWidgets.QListWidget()
+        results.addItem("TEST — Synthetic structure [ID 42]")
+        results.show()
+        fake = types.SimpleNamespace(
+            region_search=search, region_search_results=results
+        )
+        viewer.ViewerWindow._clear_region_search(fake)
+        self.assertEqual(search.text(), "")
+        self.assertEqual(results.count(), 0)
+        self.assertTrue(results.isHidden())
+
+    def test_region_search_inside_detection_includes_widget_children(self) -> None:
+        search = viewer.QtWidgets.QLineEdit()
+        results = viewer.QtWidgets.QListWidget()
+        outside = viewer.QtWidgets.QPushButton()
+        fake = types.SimpleNamespace(
+            region_search=search, region_search_results=results
+        )
+        self.assertTrue(viewer.ViewerWindow._inside_region_search(fake, search))
+        self.assertTrue(
+            viewer.ViewerWindow._inside_region_search(fake, results.viewport())
+        )
+        self.assertFalse(viewer.ViewerWindow._inside_region_search(fake, outside))
+
     def test_cache_namespace_is_per_user_and_signature_scoped(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory) / "cache" / "atlas"
