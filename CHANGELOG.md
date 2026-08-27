@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.3.4 — 2026-08-27
+
+- Render enlarged axons as continuous smooth tubes instead of segmented blocks.
+- Add a thin 0x centerline mode while keeping 1x as the minimum tube width.
+- Introduce the finalized fluorescent-neuron logo across application and Windows icon assets.
+- Add a startup animation that reveals the exact final logo outward from its central soma.
+- Smoothly cross-fade the startup screen into the main viewer window.
+
 ## 2.3.3 — 2026-08-26
 
 - Remove unintended SWC vertex cells so axons render without fixed-size square nodes.
