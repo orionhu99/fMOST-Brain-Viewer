@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import colorsys
+import ctypes
 import csv
 import gzip
 import hashlib
@@ -236,6 +237,22 @@ def download_release_asset(asset: dict, destination: Path, progress_callback=Non
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def launch_update_installer(installer: Path) -> bool:
+    """Start an update with the permissions required to replace an old install."""
+    if sys.platform == "win32":
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            str(installer),
+            "/CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS",
+            None,
+            1,
+        )
+        return int(result) > 32
+    launched = QtCore.QProcess.startDetached(str(installer), [])
+    return bool(launched[0] if isinstance(launched, tuple) else launched)
 
 
 def configure_logging() -> Path:
@@ -2856,9 +2873,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
             )
             return
         progress.close()
-        launched = QtCore.QProcess.startDetached(str(installer), [])
-        if isinstance(launched, tuple):
-            launched = launched[0]
+        launched = launch_update_installer(installer)
         if not launched:
             QtWidgets.QMessageBox.critical(
                 self, "Cannot start installer", f"Run this file manually:\n{installer}"

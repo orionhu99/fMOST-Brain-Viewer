@@ -14,7 +14,7 @@ Framework（CCFv3）脑图谱。软件支持多数据集联合显示、冠状面
 普通用户不需要安装 Python、Git，也不需要使用命令行。
 
 1. 从 [最新 Release](https://github.com/orionhu99/fMOST-Brain-Viewer/releases/latest)
-   下载 `fMOST-Brain-Viewer-Setup-2.3.5-win64.exe`。
+   下载 `fMOST-Brain-Viewer-Setup-2.3.6-win64.exe`。
 2. 双击安装程序，按照简短的向导完成安装。
 3. 启动 **fMOST Brain Viewer**；首次启动时下载 Allen CCF 图谱，或者选择已有图谱目录。
 4. 选择已经配准的数据集文件夹并开始查看。
@@ -105,4 +105,4 @@ Li Bo Lab, Westlake University。Allen 数据、Qt/PySide 和其他依赖保留�
 详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；引用信息见
 [CITATION.cff](CITATION.cff)。
 
-当前版本：**2.3.5 — 单击选择脑区与正式应用图标**。
+当前版本：**2.3.6 — 透明应用图标与可靠的提权更新**。

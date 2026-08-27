@@ -22,26 +22,10 @@ def alpha_crop(image: Image.Image, threshold: int = 2) -> Image.Image:
     return image.crop(bounds)
 
 
-def black_background_crop(image: Image.Image, threshold: int = 8) -> Image.Image:
-    """Crop visible logo content while retaining its approved black backdrop."""
-    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    visible = Image.fromarray(rgb.max(axis=2)).point(
-        lambda value: 255 if value > threshold else 0
-    )
-    bounds = visible.getbbox()
-    if bounds is None:
-        raise ValueError("Approved logo master contains no visible artwork")
-    return image.convert("RGBA").crop(bounds)
-
-
 def black_to_alpha(image: Image.Image) -> Image.Image:
     """Recover a clean RGBA glow whose composite on black matches the master."""
     rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
     alpha = rgb.max(axis=2, keepdims=True)
-    red, green, blue = (rgb[:, :, index] for index in range(3))
-    green_glow = (green > 8) & (green >= red * 1.15) & (green >= blue * 1.15)
-    neutral_core = (rgb.min(axis=2) > 72) & (rgb.max(axis=2) - rgb.min(axis=2) < 64)
-    alpha[~(green_glow | neutral_core), 0] = 0
     alpha[alpha < 8] = 0
     straight = np.divide(rgb * 255.0, alpha, out=np.zeros_like(rgb), where=alpha > 0)
     rgba = np.concatenate((straight, alpha), axis=2).clip(0, 255).astype(np.uint8)
@@ -76,14 +60,12 @@ def main() -> None:
     black.alpha_composite(logo)
     black.convert("RGB").save(ASSETS / "fmost_brain_logo_black.png", optimize=True)
 
-    # The detailed pearl-white logo reads best as a desktop launcher on its
-    # approved black field. Keeping that field also avoids dark color fringes
-    # from reconstructing transparency around the fluorescent axon.
+    # Keep the launcher background transparent so Windows can composite the
+    # icon naturally on light, dark, and custom desktop themes.
     icon_master = contain(
-        black_background_crop(black_master),
+        cropped,
         (1024, 1024),
         margin=0.07,
-        background=(0, 0, 0, 255),
     )
     icon_master.save(ASSETS / "fmost_brain_icon.png", optimize=True)
 

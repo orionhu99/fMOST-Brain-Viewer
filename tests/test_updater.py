@@ -67,6 +67,18 @@ class UpdaterTests(unittest.TestCase):
             "fMOST-Brain-Viewer-Setup-2.3.2-win64.exe",
         )
 
+    def test_windows_update_requests_elevation_and_closes_running_app(self) -> None:
+        shell_execute = mock.Mock(return_value=42)
+        fake_windll = mock.Mock()
+        fake_windll.shell32.ShellExecuteW = shell_execute
+        with (
+            mock.patch.object(viewer.sys, "platform", "win32"),
+            mock.patch.object(viewer.ctypes, "windll", fake_windll, create=True),
+        ):
+            self.assertTrue(viewer.launch_update_installer(Path("update.exe")))
+        self.assertEqual(shell_execute.call_args.args[1], "runas")
+        self.assertIn("/FORCECLOSEAPPLICATIONS", shell_execute.call_args.args[3])
+
     def test_atomic_download_verifies_sha256_and_cleans_part(self) -> None:
         payload = b"synthetic installer"
         asset = {

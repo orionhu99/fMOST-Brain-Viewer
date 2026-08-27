@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.6 — 2026-08-28
+
+- Give the application, executable, and Windows icon a true transparent background.
+- Request elevation for in-app updates so protected legacy installation directories can be replaced.
+- Ask the installer to close applications and DLLs that still hold destination files open.
+
 ## 2.3.5 — 2026-08-28
 
 - Select and add an atlas search result with one left click instead of a double-click.
