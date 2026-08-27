@@ -15,7 +15,7 @@ rotating GIF export, and reusable sessions.
 
 Python, Git, and a command prompt are **not** required.
 
-1. Download `fMOST-Brain-Viewer-Setup-2.3.3-win64.exe` from the
+1. Download `fMOST-Brain-Viewer-Setup-2.3.4-win64.exe` from the
    [latest release](https://github.com/orionhu99/fMOST-Brain-Viewer/releases/latest).
 2. Double-click the installer and follow the short setup wizard.
 3. Start **fMOST Brain Viewer**. On first launch, download the Allen CCF atlas or
@@ -79,6 +79,7 @@ manual region corrections, and import diagnostics.
 - Search atlas structures live by acronym, name, or Allen structure ID, then
   add the highlighted result by keyboard or mouse.
 - Render only the connected SWC line topology, without fixed-size node markers.
+- Render enlarged axons as continuous smooth tubes while retaining a thin 0x line mode.
 - Keep soma display independent or strictly bound to visible axons.
 - Save and reopen multi-dataset `.fmost-session.json` sessions.
 - Export TIFF, PNG, JPEG, or BMP captures and looping rotating GIFs.
@@ -118,4 +119,4 @@ other dependencies retain their own terms; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Citation metadata are provided
 in [CITATION.cff](CITATION.cff).
 
-Current version: **2.3.3 — Axon topology and responsive interaction fixes**.
+Current version: **2.3.4 — Smooth axons and refreshed visual identity**.

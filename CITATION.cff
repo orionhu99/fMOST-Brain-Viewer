@@ -8,8 +8,8 @@ authors:
   - family-names: HU
     given-names: Orion
     affiliation: Li Bo Lab, Westlake University
-version: 2.3.3
-date-released: 2026-08-26
+version: 2.3.4
+date-released: 2026-08-27
 url: https://github.com/orionhu99/fMOST-Brain-Viewer
 repository-code: https://github.com/orionhu99/fMOST-Brain-Viewer
 license: MIT
@@ -26,6 +26,6 @@ preferred-citation:
     - family-names: HU
       given-names: Orion
       affiliation: Li Bo Lab, Westlake University
-  version: 2.3.3
+  version: 2.3.4
   year: 2026
   url: https://github.com/orionhu99/fMOST-Brain-Viewer

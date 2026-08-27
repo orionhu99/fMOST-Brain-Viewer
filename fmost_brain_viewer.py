@@ -42,7 +42,8 @@ UNASSIGNED_COLOR = "#888888"
 ACTIVE_PROJECT: Path | None = None
 REGION_CACHE_VERSION = 3
 DEFAULT_BRAIN_OPACITY = 0.20
-DEFAULT_RENDER_LINES_AS_TUBES = False
+AXON_TUBE_RADIUS_PER_SIZE_UM = 4.0
+AXON_TUBE_SIDES = 8
 MAX_HIDDEN_AXON_ACTORS = 64
 MAX_HIDDEN_AXON_POINTS = 2_000_000
 ATLAS_TEMPLATE_NAME = "average_template_25.nrrd"
@@ -1018,10 +1019,47 @@ def line_mesh(points: np.ndarray, edges: np.ndarray) -> pv.PolyData:
     mesh = pv.PolyData()
     mesh.points = points
     if len(edges):
-        mesh.lines = np.column_stack(
-            (np.full(len(edges), 2, dtype=np.int64), edges)
-        ).ravel()
+        adjacency = [[] for _ in range(len(points))]
+        for first, second in edges:
+            adjacency[int(first)].append(int(second))
+            adjacency[int(second)].append(int(first))
+        unused = {tuple(sorted(map(int, edge))) for edge in edges}
+        paths = []
+        starts = [index for index, neighbors in enumerate(adjacency) if len(neighbors) != 2]
+        for start in starts:
+            for neighbor in adjacency[start]:
+                edge = tuple(sorted((start, neighbor)))
+                if edge not in unused:
+                    continue
+                path = [start, neighbor]
+                unused.remove(edge)
+                previous, current = start, neighbor
+                while len(adjacency[current]) == 2:
+                    following = next(node for node in adjacency[current] if node != previous)
+                    edge = tuple(sorted((current, following)))
+                    if edge not in unused:
+                        break
+                    path.append(following)
+                    unused.remove(edge)
+                    previous, current = current, following
+                paths.append(path)
+        for first, second in list(unused):
+            paths.append([first, second])
+        mesh.lines = np.concatenate(
+            [np.asarray([len(path), *path], dtype=np.int64) for path in paths]
+        )
     return mesh
+
+
+def axon_tube_mesh(points: np.ndarray, edges: np.ndarray, size: float) -> pv.PolyData:
+    centerlines = line_mesh(points, edges)
+    if size <= 0:
+        return centerlines
+    return centerlines.tube(
+        radius=float(size) * AXON_TUBE_RADIUS_PER_SIZE_UM,
+        n_sides=AXON_TUBE_SIDES,
+        capping=True,
+    )
 
 
 def load_volume(path: Path) -> pv.ImageData:
@@ -1722,6 +1760,78 @@ def choose_and_prepare_region_library(parent, annotation, ontology) -> bool:
     return False
 
 
+def startup_logo_layout(
+    width: float, height: float, logo_width: float, logo_height: float
+):
+    """Return the exact fitted logo bounds, soma, and full reveal radius."""
+    scale = min(width / logo_width, height / logo_height)
+    target_width = logo_width * scale
+    target_height = logo_height * scale
+    target = QtCore.QRectF(
+        (width - target_width) / 2,
+        (height - target_height) / 2,
+        target_width,
+        target_height,
+    )
+    soma = QtCore.QPointF(
+        target.left() + target.width() * 0.514,
+        target.top() + target.height() * 0.526,
+    )
+    corners = (target.topLeft(), target.topRight(), target.bottomLeft(), target.bottomRight())
+    radius = max(QtCore.QLineF(soma, corner).length() for corner in corners)
+    return target, soma, radius
+
+
+class AnimatedStartupLogo(QtWidgets.QWidget):
+    """Reveal the approved logo itself outward from its central soma."""
+
+    DURATION_MS = 1600
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(430, 220)
+        self.logo = QtGui.QPixmap(str(APP_LOGO))
+        self.elapsed = QtCore.QElapsedTimer()
+        self.timer = QtCore.QTimer(self)
+        self.timer.setInterval(16)
+        self.timer.timeout.connect(self.update)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.elapsed.start()
+        self.timer.start()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        del event
+        elapsed = self.elapsed.elapsed() if self.elapsed.isValid() else 0
+        progress = min(1.0, elapsed / self.DURATION_MS)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        target, soma, full_radius = startup_logo_layout(
+            self.width(), self.height(), self.logo.width(), self.logo.height()
+        )
+        growth = min(1.0, progress / 0.92)
+        growth = growth * growth * (3.0 - 2.0 * growth)
+        if growth < 1.0:
+            radius = full_radius * growth
+            for feather, opacity in ((18.0, 0.08), (11.0, 0.14), (5.0, 0.24), (0.0, 1.0)):
+                reveal = QtGui.QPainterPath()
+                reveal.addEllipse(soma, radius + feather, radius + feather)
+                painter.setClipPath(
+                    reveal, QtCore.Qt.ClipOperation.ReplaceClip
+                )
+                painter.setOpacity(opacity)
+                painter.drawPixmap(target, self.logo, QtCore.QRectF(self.logo.rect()))
+            painter.setOpacity(1.0)
+            painter.setClipping(False)
+        else:
+            painter.drawPixmap(target, self.logo, QtCore.QRectF(self.logo.rect()))
+        if progress >= 1.0:
+            self.timer.stop()
+
+
 class StartupSplash(QtWidgets.QWidget):
     """Small branded splash that remains responsive during synchronous loading."""
 
@@ -1744,17 +1854,9 @@ class StartupSplash(QtWidgets.QWidget):
         layout.setContentsMargins(38, 25, 38, 25)
         layout.setSpacing(8)
 
-        logo = QtWidgets.QLabel()
-        pixmap = QtGui.QPixmap(str(APP_LOGO))
-        logo.setPixmap(
-            pixmap.scaled(
-                430, 220,
-                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                QtCore.Qt.TransformationMode.SmoothTransformation,
-            )
-        )
-        logo.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        logo = AnimatedStartupLogo()
         layout.addWidget(logo, stretch=1)
+        layout.setAlignment(logo, QtCore.Qt.AlignmentFlag.AlignCenter)
 
         title = QtWidgets.QLabel("fMOST Brain Viewer")
         title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -1782,15 +1884,13 @@ class StartupSplash(QtWidgets.QWidget):
         version.setStyleSheet("color: #89978e; font-size: 9pt;")
         layout.addWidget(version)
 
-        self.opacity_effect = QtWidgets.QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(self.opacity_effect)
         self.fade_animation = QtCore.QPropertyAnimation(
-            self.opacity_effect, b"opacity", self
+            self, b"windowOpacity", self
         )
-        self.fade_animation.setDuration(450)
+        self.fade_animation.setDuration(620)
         self.fade_animation.setStartValue(0.0)
         self.fade_animation.setEndValue(1.0)
-        self.fade_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self.fade_animation.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -1801,6 +1901,34 @@ class StartupSplash(QtWidgets.QWidget):
 
     def setValue(self, value: int) -> None:  # noqa: N802
         self.bar.setValue(value)
+
+    def transition_to(self, window: QtWidgets.QWidget) -> None:
+        """Cross-fade from the completed splash into the main window."""
+        self.fade_animation.stop()
+        window.setWindowOpacity(0.0)
+        window.show()
+
+        splash_fade = QtCore.QPropertyAnimation(self, b"windowOpacity", self)
+        splash_fade.setDuration(320)
+        splash_fade.setStartValue(self.windowOpacity())
+        splash_fade.setEndValue(0.0)
+        splash_fade.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+
+        window_fade = QtCore.QPropertyAnimation(window, b"windowOpacity", self)
+        window_fade.setDuration(320)
+        window_fade.setStartValue(0.0)
+        window_fade.setEndValue(1.0)
+        window_fade.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+
+        group = QtCore.QParallelAnimationGroup(self)
+        group.addAnimation(splash_fade)
+        group.addAnimation(window_fade)
+        loop = QtCore.QEventLoop(self)
+        group.finished.connect(loop.quit)
+        group.start()
+        loop.exec()
+        window.setWindowOpacity(1.0)
+        self.close()
 
 
 class CaptureDialog(QtWidgets.QDialog):
@@ -2523,8 +2651,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
             0.0, 1.0, 0.05, DEFAULT_BRAIN_OPACITY, 2
         )
         appearance_layout.addRow("3D brain opacity", self.template_opacity)
-        self.axon_width = self._spinbox(1.0, 10.0, 0.5, 1.0, 1)
-        appearance_layout.addRow("Axon thickness (px)", self.axon_width)
+        self.axon_width = self._spinbox(0.0, 10.0, 0.5, 0.0, 1)
+        appearance_layout.addRow("Axon thickness (×)", self.axon_width)
         self.soma_size = self._spinbox(1.0, 50.0, 1.0, 10.0, 1)
         appearance_layout.addRow("Soma size", self.soma_size)
         layout.addWidget(appearance_group)
@@ -3004,11 +3132,13 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self._touch_axon_actor(key)
             return actor
         points, edges = read_swc(self.axon_sources[key])
+        size = self.axon_width.value()
         actor = self.plotter.add_mesh(
-            line_mesh(points, edges),
+            axon_tube_mesh(points, edges, size),
             color=self.manual_colors[key],
-            line_width=self.axon_width.value(),
-            render_lines_as_tubes=DEFAULT_RENDER_LINES_AS_TUBES,
+            line_width=1.0,
+            render_lines_as_tubes=False,
+            smooth_shading=size > 0,
             name=f"axon_{len(self.axon_actors)}",
             render=False,
         )
@@ -3297,7 +3427,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.template_opacity.setValue(
             float(self.config.get("brain_opacity", DEFAULT_BRAIN_OPACITY))
         )
-        self.axon_width.setValue(max(1.0, float(self.config.get("axon_width", 1.0))))
+        self.axon_width.setValue(max(0.0, float(self.config.get("axon_width", 0.0))))
         self.soma_size.setValue(float(self.config.get("soma_size", 10.0)))
         self.region_opacity.setValue(float(self.config.get("region_opacity", 0.55)))
         self.soma_check.setChecked(bool(self.config.get("show_all_somas", True)))
@@ -3694,8 +3824,11 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.coronal_repeat_step = 0
 
     def _set_axon_width(self, width: float) -> None:
-        for actor in self.axon_actors.values():
-            actor.GetProperty().SetLineWidth(width)
+        visible = [key for key, actor in self.axon_actors.items() if actor.GetVisibility()]
+        for key in list(self.axon_actors):
+            self._remove_axon_actor(key)
+        for key in visible:
+            self._ensure_axon_actor(key).SetVisibility(True)
         self.plotter.render()
 
     def _set_soma_size(self, size: float) -> None:
@@ -4648,8 +4781,7 @@ def main() -> int:
             None, "Cannot open dataset", f"{exc}\n\nLog: {LOG_PATH}"
         )
         return 1
-    window.show()
-    progress.close()
+    progress.transition_to(window)
     return app.exec()
 
 

@@ -25,7 +25,13 @@ DATA_SUFFIXES = {
 DATA_FILENAMES = {"viewer_config.json"}
 DATA_PATH_PARTS = {"viewer_cache", "atlas_cache", "captures", "recordings"}
 ALLOWED_REPOSITORY_IMAGES = {
-    "fmost_brain_icon.png", "fmost_brain_logo.png", "fmost_brain_viewer.ico",
+    "fmost_brain_icon.png",
+    "fmost_brain_logo.png",
+    "fmost_brain_logo_black.png",
+    "fmost_brain_logo_final_black.png",
+    "fmost_brain_logo_final_transparent.png",
+    "fmost_brain_viewer.ico",
+    *(f"fmost_brain_icon_{size}.png" for size in (16, 24, 32, 48, 64, 128, 256)),
 }
 
 

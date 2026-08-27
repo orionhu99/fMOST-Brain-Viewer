@@ -21,9 +21,36 @@ class Viewer231ImprovementTests(unittest.TestCase):
         points = np.zeros((3, 3), dtype=float)
         edges = np.array([[0, 1], [1, 2]], dtype=np.int64)
         mesh = viewer.line_mesh(points, edges)
-        self.assertEqual(mesh.n_lines, 2)
+        self.assertEqual(mesh.n_lines, 1)
         self.assertEqual(mesh.n_verts, 0)
-        self.assertEqual(mesh.n_cells, 2)
+        self.assertEqual(mesh.n_cells, 1)
+
+    def test_axon_tube_is_continuous_geometry(self) -> None:
+        points = np.array([[0, 0, 0], [10, 0, 0], [20, 5, 0]], dtype=float)
+        edges = np.array([[0, 1], [1, 2]], dtype=np.int64)
+        tube = viewer.axon_tube_mesh(points, edges, 1.0)
+        self.assertGreater(tube.n_strips, 0)
+        self.assertEqual(tube.n_lines, 0)
+        self.assertGreater(tube.n_points, len(points))
+
+    def test_zero_axon_size_preserves_thin_centerline(self) -> None:
+        points = np.array([[0, 0, 0], [10, 0, 0], [20, 5, 0]], dtype=float)
+        edges = np.array([[0, 1], [1, 2]], dtype=np.int64)
+        centerline = viewer.axon_tube_mesh(points, edges, 0.0)
+        self.assertEqual(centerline.n_lines, 1)
+        self.assertEqual(centerline.n_strips, 0)
+        self.assertEqual(centerline.n_points, len(points))
+
+    def test_startup_logo_reveal_uses_exact_fitted_image_geometry(self) -> None:
+        target, soma, radius = viewer.startup_logo_layout(430, 220, 1536, 768)
+        self.assertAlmostEqual(target.width() / target.height(), 2.0)
+        self.assertAlmostEqual(target.center().x(), 215.0)
+        self.assertAlmostEqual(target.center().y(), 110.0)
+        self.assertTrue(target.contains(soma))
+        for corner in (
+            target.topLeft(), target.topRight(), target.bottomLeft(), target.bottomRight()
+        ):
+            self.assertLessEqual(viewer.QtCore.QLineF(soma, corner).length(), radius)
 
     def test_successful_region_search_can_be_cleared_and_hidden(self) -> None:
         search = viewer.QtWidgets.QLineEdit("TEST")
@@ -165,7 +192,8 @@ class Viewer231ImprovementTests(unittest.TestCase):
 
     def test_default_opacity_contract(self) -> None:
         self.assertEqual(viewer.DEFAULT_BRAIN_OPACITY, 0.20)
-        self.assertFalse(viewer.DEFAULT_RENDER_LINES_AS_TUBES)
+        self.assertEqual(viewer.AXON_TUBE_RADIUS_PER_SIZE_UM, 4.0)
+        self.assertEqual(viewer.AXON_TUBE_SIDES, 8)
 
 
 if __name__ == "__main__":
