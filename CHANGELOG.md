@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.3.5 — 2026-08-28
+
+- Select and add an atlas search result with one left click instead of a double-click.
+- Adopt the pearl-white anatomical brain artwork as the primary application and Windows icon.
+- Preserve the previous line-art identity under `assets/lite` for a possible lightweight edition.
+- Keep the Windows icon on its approved black field for reliable small-size rendering.
+- Remove the startup reveal and fade transitions in favor of a fast, static startup screen.
+
 ## 2.3.4 — 2026-08-27
 
 - Render enlarged axons as continuous smooth tubes instead of segmented blocks.

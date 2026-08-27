@@ -1760,78 +1760,6 @@ def choose_and_prepare_region_library(parent, annotation, ontology) -> bool:
     return False
 
 
-def startup_logo_layout(
-    width: float, height: float, logo_width: float, logo_height: float
-):
-    """Return the exact fitted logo bounds, soma, and full reveal radius."""
-    scale = min(width / logo_width, height / logo_height)
-    target_width = logo_width * scale
-    target_height = logo_height * scale
-    target = QtCore.QRectF(
-        (width - target_width) / 2,
-        (height - target_height) / 2,
-        target_width,
-        target_height,
-    )
-    soma = QtCore.QPointF(
-        target.left() + target.width() * 0.514,
-        target.top() + target.height() * 0.526,
-    )
-    corners = (target.topLeft(), target.topRight(), target.bottomLeft(), target.bottomRight())
-    radius = max(QtCore.QLineF(soma, corner).length() for corner in corners)
-    return target, soma, radius
-
-
-class AnimatedStartupLogo(QtWidgets.QWidget):
-    """Reveal the approved logo itself outward from its central soma."""
-
-    DURATION_MS = 1600
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(430, 220)
-        self.logo = QtGui.QPixmap(str(APP_LOGO))
-        self.elapsed = QtCore.QElapsedTimer()
-        self.timer = QtCore.QTimer(self)
-        self.timer.setInterval(16)
-        self.timer.timeout.connect(self.update)
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        self.elapsed.start()
-        self.timer.start()
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        del event
-        elapsed = self.elapsed.elapsed() if self.elapsed.isValid() else 0
-        progress = min(1.0, elapsed / self.DURATION_MS)
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-
-        target, soma, full_radius = startup_logo_layout(
-            self.width(), self.height(), self.logo.width(), self.logo.height()
-        )
-        growth = min(1.0, progress / 0.92)
-        growth = growth * growth * (3.0 - 2.0 * growth)
-        if growth < 1.0:
-            radius = full_radius * growth
-            for feather, opacity in ((18.0, 0.08), (11.0, 0.14), (5.0, 0.24), (0.0, 1.0)):
-                reveal = QtGui.QPainterPath()
-                reveal.addEllipse(soma, radius + feather, radius + feather)
-                painter.setClipPath(
-                    reveal, QtCore.Qt.ClipOperation.ReplaceClip
-                )
-                painter.setOpacity(opacity)
-                painter.drawPixmap(target, self.logo, QtCore.QRectF(self.logo.rect()))
-            painter.setOpacity(1.0)
-            painter.setClipping(False)
-        else:
-            painter.drawPixmap(target, self.logo, QtCore.QRectF(self.logo.rect()))
-        if progress >= 1.0:
-            self.timer.stop()
-
-
 class StartupSplash(QtWidgets.QWidget):
     """Small branded splash that remains responsive during synchronous loading."""
 
@@ -1854,7 +1782,16 @@ class StartupSplash(QtWidgets.QWidget):
         layout.setContentsMargins(38, 25, 38, 25)
         layout.setSpacing(8)
 
-        logo = AnimatedStartupLogo()
+        logo = QtWidgets.QLabel()
+        logo.setPixmap(
+            QtGui.QPixmap(str(APP_LOGO)).scaled(
+                430,
+                220,
+                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        logo.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(logo, stretch=1)
         layout.setAlignment(logo, QtCore.Qt.AlignmentFlag.AlignCenter)
 
@@ -1884,52 +1821,11 @@ class StartupSplash(QtWidgets.QWidget):
         version.setStyleSheet("color: #89978e; font-size: 9pt;")
         layout.addWidget(version)
 
-        self.fade_animation = QtCore.QPropertyAnimation(
-            self, b"windowOpacity", self
-        )
-        self.fade_animation.setDuration(620)
-        self.fade_animation.setStartValue(0.0)
-        self.fade_animation.setEndValue(1.0)
-        self.fade_animation.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        self.fade_animation.start()
-
     def setLabelText(self, message: str) -> None:  # noqa: N802
         self.message.setText(message)
 
     def setValue(self, value: int) -> None:  # noqa: N802
         self.bar.setValue(value)
-
-    def transition_to(self, window: QtWidgets.QWidget) -> None:
-        """Cross-fade from the completed splash into the main window."""
-        self.fade_animation.stop()
-        window.setWindowOpacity(0.0)
-        window.show()
-
-        splash_fade = QtCore.QPropertyAnimation(self, b"windowOpacity", self)
-        splash_fade.setDuration(320)
-        splash_fade.setStartValue(self.windowOpacity())
-        splash_fade.setEndValue(0.0)
-        splash_fade.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
-
-        window_fade = QtCore.QPropertyAnimation(window, b"windowOpacity", self)
-        window_fade.setDuration(320)
-        window_fade.setStartValue(0.0)
-        window_fade.setEndValue(1.0)
-        window_fade.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
-
-        group = QtCore.QParallelAnimationGroup(self)
-        group.addAnimation(splash_fade)
-        group.addAnimation(window_fade)
-        loop = QtCore.QEventLoop(self)
-        group.finished.connect(loop.quit)
-        group.start()
-        loop.exec()
-        window.setWindowOpacity(1.0)
-        self.close()
-
 
 class CaptureDialog(QtWidgets.QDialog):
     FORMATS = {
@@ -2764,7 +2660,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         region_none.clicked.connect(lambda: self._check_all_regions(False))
         add_region_button.clicked.connect(self._add_region_from_search)
         self.region_search.textEdited.connect(self._update_region_search_results)
-        self.region_search_results.itemDoubleClicked.connect(
+        self.region_search_results.itemClicked.connect(
             lambda _item: self._add_region_from_search()
         )
         self.region_search.installEventFilter(self)
@@ -4781,7 +4677,8 @@ def main() -> int:
             None, "Cannot open dataset", f"{exc}\n\nLog: {LOG_PATH}"
         )
         return 1
-    progress.transition_to(window)
+    window.show()
+    progress.close()
     return app.exec()
 
 

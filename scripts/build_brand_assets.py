@@ -22,6 +22,18 @@ def alpha_crop(image: Image.Image, threshold: int = 2) -> Image.Image:
     return image.crop(bounds)
 
 
+def black_background_crop(image: Image.Image, threshold: int = 8) -> Image.Image:
+    """Crop visible logo content while retaining its approved black backdrop."""
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    visible = Image.fromarray(rgb.max(axis=2)).point(
+        lambda value: 255 if value > threshold else 0
+    )
+    bounds = visible.getbbox()
+    if bounds is None:
+        raise ValueError("Approved logo master contains no visible artwork")
+    return image.convert("RGBA").crop(bounds)
+
+
 def black_to_alpha(image: Image.Image) -> Image.Image:
     """Recover a clean RGBA glow whose composite on black matches the master."""
     rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
@@ -36,8 +48,13 @@ def black_to_alpha(image: Image.Image) -> Image.Image:
     return Image.fromarray(rgba, "RGBA")
 
 
-def contain(image: Image.Image, size: tuple[int, int], margin: float) -> Image.Image:
-    canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+def contain(
+    image: Image.Image,
+    size: tuple[int, int],
+    margin: float,
+    background: tuple[int, int, int, int] = (0, 0, 0, 0),
+) -> Image.Image:
+    canvas = Image.new("RGBA", size, background)
     maximum = (round(size[0] * (1 - 2 * margin)), round(size[1] * (1 - 2 * margin)))
     fitted = image.copy()
     fitted.thumbnail(maximum, Image.Resampling.LANCZOS)
@@ -47,7 +64,8 @@ def contain(image: Image.Image, size: tuple[int, int], margin: float) -> Image.I
 
 
 def main() -> None:
-    master = black_to_alpha(Image.open(MASTER))
+    black_master = Image.open(MASTER).convert("RGBA")
+    master = black_to_alpha(black_master)
     master.save(ASSETS / "fmost_brain_logo_final_transparent.png", optimize=True)
     cropped = alpha_crop(master)
 
@@ -58,7 +76,15 @@ def main() -> None:
     black.alpha_composite(logo)
     black.convert("RGB").save(ASSETS / "fmost_brain_logo_black.png", optimize=True)
 
-    icon_master = contain(cropped, (1024, 1024), margin=0.07)
+    # The detailed pearl-white logo reads best as a desktop launcher on its
+    # approved black field. Keeping that field also avoids dark color fringes
+    # from reconstructing transparency around the fluorescent axon.
+    icon_master = contain(
+        black_background_crop(black_master),
+        (1024, 1024),
+        margin=0.07,
+        background=(0, 0, 0, 255),
+    )
     icon_master.save(ASSETS / "fmost_brain_icon.png", optimize=True)
 
     icon_dir = ASSETS / "icon_sizes"

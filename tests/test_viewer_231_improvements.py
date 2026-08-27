@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import tempfile
 import types
 import unittest
@@ -41,17 +42,6 @@ class Viewer231ImprovementTests(unittest.TestCase):
         self.assertEqual(centerline.n_strips, 0)
         self.assertEqual(centerline.n_points, len(points))
 
-    def test_startup_logo_reveal_uses_exact_fitted_image_geometry(self) -> None:
-        target, soma, radius = viewer.startup_logo_layout(430, 220, 1536, 768)
-        self.assertAlmostEqual(target.width() / target.height(), 2.0)
-        self.assertAlmostEqual(target.center().x(), 215.0)
-        self.assertAlmostEqual(target.center().y(), 110.0)
-        self.assertTrue(target.contains(soma))
-        for corner in (
-            target.topLeft(), target.topRight(), target.bottomLeft(), target.bottomRight()
-        ):
-            self.assertLessEqual(viewer.QtCore.QLineF(soma, corner).length(), radius)
-
     def test_successful_region_search_can_be_cleared_and_hidden(self) -> None:
         search = viewer.QtWidgets.QLineEdit("TEST")
         results = viewer.QtWidgets.QListWidget()
@@ -64,6 +54,11 @@ class Viewer231ImprovementTests(unittest.TestCase):
         self.assertEqual(search.text(), "")
         self.assertEqual(results.count(), 0)
         self.assertTrue(results.isHidden())
+
+    def test_region_search_result_uses_single_click_selection(self) -> None:
+        source = inspect.getsource(viewer.ViewerWindow._build_ui)
+        self.assertIn("region_search_results.itemClicked.connect", source)
+        self.assertNotIn("region_search_results.itemDoubleClicked.connect", source)
 
     def test_region_search_inside_detection_includes_widget_children(self) -> None:
         search = viewer.QtWidgets.QLineEdit()

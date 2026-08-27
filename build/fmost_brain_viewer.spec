@@ -103,6 +103,16 @@ for package in ("pyvista", "pyvistaqt"):
     binaries += package_binaries
     hiddenimports += package_hidden
 
+# PySide6 6.11 loads this runtime beside QtCore.pyd's DLL search root, while
+# PyInstaller's shiboken hook keeps it only inside the package subdirectory.
+if sys.platform == "win32":
+    shiboken_runtime = Path(
+        distribution("shiboken6").locate_file("shiboken6/shiboken6.abi3.dll")
+    )
+    if not shiboken_runtime.is_file():
+        raise RuntimeError(f"Shiboken runtime is missing: {shiboken_runtime}")
+    binaries.append((str(shiboken_runtime), "."))
+
 analysis = Analysis(
     [str(ROOT / "fmost_brain_viewer.py")],
     pathex=[str(ROOT)],
@@ -116,6 +126,16 @@ analysis = Analysis(
     noarchive=False,
     optimize=1,
 )
+
+# Qt 6.11 intentionally uses the unversioned Windows ICU compatibility DLL.
+# A build host may expose Poppler's incompatible same-named ICU 78 DLL first;
+# never bundle that copy because it shadows the supported Windows system DLL.
+if sys.platform == "win32":
+    incompatible_icu = {"icuuc.dll", "icudt78.dll"}
+    analysis.binaries = type(analysis.binaries)(
+        entry for entry in analysis.binaries
+        if Path(entry[0]).name.casefold() not in incompatible_icu
+    )
 
 pyz = PYZ(analysis.pure)
 
