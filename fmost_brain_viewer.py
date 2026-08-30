@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import colorsys
+import ctypes
 import csv
 import gzip
 import hashlib
@@ -208,6 +209,10 @@ def fetch_github_releases() -> list[dict]:
 
 def download_release_asset(asset: dict, destination: Path, progress_callback=None) -> Path:
     """Download one GitHub release asset atomically and verify its digest."""
+    expected = str(asset.get("digest", "")).strip()
+    expected_match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", expected)
+    if expected_match is None:
+        raise ValueError("Installer SHA-256 metadata is missing or invalid.")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".part")
     request = urllib.request.Request(
@@ -228,14 +233,29 @@ def download_release_asset(asset: dict, destination: Path, progress_callback=Non
                 downloaded += len(block)
                 if progress_callback is not None:
                     progress_callback(downloaded, total)
-        expected = str(asset.get("digest", ""))
-        if expected.startswith("sha256:") and digest.hexdigest() != expected[7:].casefold():
+        if digest.hexdigest() != expected_match.group(1).casefold():
             raise ValueError("Downloaded installer SHA-256 does not match GitHub metadata.")
         temporary.replace(destination)
         return destination
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def launch_update_installer(installer: Path) -> bool:
+    """Start an update with the permissions required to replace an old install."""
+    if sys.platform == "win32":
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            str(installer),
+            "/CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS",
+            None,
+            1,
+        )
+        return int(result) > 32
+    launched = QtCore.QProcess.startDetached(str(installer), [])
+    return bool(launched[0] if isinstance(launched, tuple) else launched)
 
 
 def configure_logging() -> Path:
@@ -1760,78 +1780,6 @@ def choose_and_prepare_region_library(parent, annotation, ontology) -> bool:
     return False
 
 
-def startup_logo_layout(
-    width: float, height: float, logo_width: float, logo_height: float
-):
-    """Return the exact fitted logo bounds, soma, and full reveal radius."""
-    scale = min(width / logo_width, height / logo_height)
-    target_width = logo_width * scale
-    target_height = logo_height * scale
-    target = QtCore.QRectF(
-        (width - target_width) / 2,
-        (height - target_height) / 2,
-        target_width,
-        target_height,
-    )
-    soma = QtCore.QPointF(
-        target.left() + target.width() * 0.514,
-        target.top() + target.height() * 0.526,
-    )
-    corners = (target.topLeft(), target.topRight(), target.bottomLeft(), target.bottomRight())
-    radius = max(QtCore.QLineF(soma, corner).length() for corner in corners)
-    return target, soma, radius
-
-
-class AnimatedStartupLogo(QtWidgets.QWidget):
-    """Reveal the approved logo itself outward from its central soma."""
-
-    DURATION_MS = 1600
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(430, 220)
-        self.logo = QtGui.QPixmap(str(APP_LOGO))
-        self.elapsed = QtCore.QElapsedTimer()
-        self.timer = QtCore.QTimer(self)
-        self.timer.setInterval(16)
-        self.timer.timeout.connect(self.update)
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        self.elapsed.start()
-        self.timer.start()
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        del event
-        elapsed = self.elapsed.elapsed() if self.elapsed.isValid() else 0
-        progress = min(1.0, elapsed / self.DURATION_MS)
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-
-        target, soma, full_radius = startup_logo_layout(
-            self.width(), self.height(), self.logo.width(), self.logo.height()
-        )
-        growth = min(1.0, progress / 0.92)
-        growth = growth * growth * (3.0 - 2.0 * growth)
-        if growth < 1.0:
-            radius = full_radius * growth
-            for feather, opacity in ((18.0, 0.08), (11.0, 0.14), (5.0, 0.24), (0.0, 1.0)):
-                reveal = QtGui.QPainterPath()
-                reveal.addEllipse(soma, radius + feather, radius + feather)
-                painter.setClipPath(
-                    reveal, QtCore.Qt.ClipOperation.ReplaceClip
-                )
-                painter.setOpacity(opacity)
-                painter.drawPixmap(target, self.logo, QtCore.QRectF(self.logo.rect()))
-            painter.setOpacity(1.0)
-            painter.setClipping(False)
-        else:
-            painter.drawPixmap(target, self.logo, QtCore.QRectF(self.logo.rect()))
-        if progress >= 1.0:
-            self.timer.stop()
-
-
 class StartupSplash(QtWidgets.QWidget):
     """Small branded splash that remains responsive during synchronous loading."""
 
@@ -1854,7 +1802,16 @@ class StartupSplash(QtWidgets.QWidget):
         layout.setContentsMargins(38, 25, 38, 25)
         layout.setSpacing(8)
 
-        logo = AnimatedStartupLogo()
+        logo = QtWidgets.QLabel()
+        logo.setPixmap(
+            QtGui.QPixmap(str(APP_LOGO)).scaled(
+                430,
+                220,
+                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        logo.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(logo, stretch=1)
         layout.setAlignment(logo, QtCore.Qt.AlignmentFlag.AlignCenter)
 
@@ -1884,52 +1841,11 @@ class StartupSplash(QtWidgets.QWidget):
         version.setStyleSheet("color: #89978e; font-size: 9pt;")
         layout.addWidget(version)
 
-        self.fade_animation = QtCore.QPropertyAnimation(
-            self, b"windowOpacity", self
-        )
-        self.fade_animation.setDuration(620)
-        self.fade_animation.setStartValue(0.0)
-        self.fade_animation.setEndValue(1.0)
-        self.fade_animation.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        self.fade_animation.start()
-
     def setLabelText(self, message: str) -> None:  # noqa: N802
         self.message.setText(message)
 
     def setValue(self, value: int) -> None:  # noqa: N802
         self.bar.setValue(value)
-
-    def transition_to(self, window: QtWidgets.QWidget) -> None:
-        """Cross-fade from the completed splash into the main window."""
-        self.fade_animation.stop()
-        window.setWindowOpacity(0.0)
-        window.show()
-
-        splash_fade = QtCore.QPropertyAnimation(self, b"windowOpacity", self)
-        splash_fade.setDuration(320)
-        splash_fade.setStartValue(self.windowOpacity())
-        splash_fade.setEndValue(0.0)
-        splash_fade.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
-
-        window_fade = QtCore.QPropertyAnimation(window, b"windowOpacity", self)
-        window_fade.setDuration(320)
-        window_fade.setStartValue(0.0)
-        window_fade.setEndValue(1.0)
-        window_fade.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
-
-        group = QtCore.QParallelAnimationGroup(self)
-        group.addAnimation(splash_fade)
-        group.addAnimation(window_fade)
-        loop = QtCore.QEventLoop(self)
-        group.finished.connect(loop.quit)
-        group.start()
-        loop.exec()
-        window.setWindowOpacity(1.0)
-        self.close()
-
 
 class CaptureDialog(QtWidgets.QDialog):
     FORMATS = {
@@ -2764,7 +2680,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         region_none.clicked.connect(lambda: self._check_all_regions(False))
         add_region_button.clicked.connect(self._add_region_from_search)
         self.region_search.textEdited.connect(self._update_region_search_results)
-        self.region_search_results.itemDoubleClicked.connect(
+        self.region_search_results.itemClicked.connect(
             lambda _item: self._add_region_from_search()
         )
         self.region_search.installEventFilter(self)
@@ -2960,9 +2876,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
             )
             return
         progress.close()
-        launched = QtCore.QProcess.startDetached(str(installer), [])
-        if isinstance(launched, tuple):
-            launched = launched[0]
+        launched = launch_update_installer(installer)
         if not launched:
             QtWidgets.QMessageBox.critical(
                 self, "Cannot start installer", f"Run this file manually:\n{installer}"
@@ -4242,17 +4156,50 @@ class ViewerWindow(QtWidgets.QMainWindow):
         except OSError as exc:
             QtWidgets.QMessageBox.critical(self, "Cannot save session", str(exc))
             return False
+        finally:
+            if temporary.exists():
+                try:
+                    temporary.unlink()
+                except OSError:
+                    LOGGER.warning("Could not remove incomplete session file: %s", temporary)
         self.session_path = path
         self.status.setText(f"Session saved: {path}")
+        return True
+
+    def _confirm_session_close(self) -> bool:
+        if self.session_path is None:
+            return True
+        while not self._save_session():
+            message = QtWidgets.QMessageBox(self)
+            message.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+            message.setWindowTitle("Session was not saved")
+            message.setText("The current session could not be saved.")
+            message.setInformativeText(
+                "Retry saving, discard the unsaved session changes, or cancel closing."
+            )
+            retry = message.addButton(
+                "Retry", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+            )
+            discard = message.addButton(
+                "Discard", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
+            )
+            message.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+            message.exec()
+            if message.clickedButton() is retry:
+                continue
+            return message.clickedButton() is discard
         return True
 
     def _replace_with_projects(
         self, projects: list[tuple[str, Path]], session_path=None, session_config=None
     ) -> None:
+        if not self._confirm_session_close():
+            return
         self._replacement_window = ViewerWindow(
             projects, session_path=session_path, session_config=session_config
         )
         self._replacement_window.show()
+        self._skip_session_save_once = True
         self.close()
 
     def _new_session(self) -> None:
@@ -4287,8 +4234,11 @@ class ViewerWindow(QtWidgets.QMainWindow):
                 )
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self.session_path is not None:
-            self._save_session()
+        if getattr(self, "_skip_session_save_once", False):
+            self._skip_session_save_once = False
+        elif not self._confirm_session_close():
+            event.ignore()
+            return
         if self.update_check_thread is not None and self.update_check_thread.isRunning():
             self.update_check_thread.quit()
             self.update_check_thread.wait(16000)
@@ -4781,7 +4731,8 @@ def main() -> int:
             None, "Cannot open dataset", f"{exc}\n\nLog: {LOG_PATH}"
         )
         return 1
-    progress.transition_to(window)
+    window.show()
+    progress.close()
     return app.exec()
 
 

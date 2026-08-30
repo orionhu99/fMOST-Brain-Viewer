@@ -19,6 +19,18 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require release tag to be contained in main
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tag $env:GITHUB_REF_NAME is not contained in origin/main."
+          }
 
       - name: Set up Python 3.12.10
         uses: actions/setup-python@v5
@@ -92,4 +104,14 @@ jobs:
             gh release upload $tag $files --clobber
           } else {
             gh release create $tag $files --verify-tag --title "fMOST Brain Viewer $tag" --generate-notes
+          }
+
+      - name: Confirm published tag remains contained in main
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Published tag $env:GITHUB_REF_NAME is not contained in origin/main."
           }

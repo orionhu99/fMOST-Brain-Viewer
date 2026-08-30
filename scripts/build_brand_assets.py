@@ -26,18 +26,19 @@ def black_to_alpha(image: Image.Image) -> Image.Image:
     """Recover a clean RGBA glow whose composite on black matches the master."""
     rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
     alpha = rgb.max(axis=2, keepdims=True)
-    red, green, blue = (rgb[:, :, index] for index in range(3))
-    green_glow = (green > 8) & (green >= red * 1.15) & (green >= blue * 1.15)
-    neutral_core = (rgb.min(axis=2) > 72) & (rgb.max(axis=2) - rgb.min(axis=2) < 64)
-    alpha[~(green_glow | neutral_core), 0] = 0
     alpha[alpha < 8] = 0
     straight = np.divide(rgb * 255.0, alpha, out=np.zeros_like(rgb), where=alpha > 0)
     rgba = np.concatenate((straight, alpha), axis=2).clip(0, 255).astype(np.uint8)
     return Image.fromarray(rgba, "RGBA")
 
 
-def contain(image: Image.Image, size: tuple[int, int], margin: float) -> Image.Image:
-    canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+def contain(
+    image: Image.Image,
+    size: tuple[int, int],
+    margin: float,
+    background: tuple[int, int, int, int] = (0, 0, 0, 0),
+) -> Image.Image:
+    canvas = Image.new("RGBA", size, background)
     maximum = (round(size[0] * (1 - 2 * margin)), round(size[1] * (1 - 2 * margin)))
     fitted = image.copy()
     fitted.thumbnail(maximum, Image.Resampling.LANCZOS)
@@ -47,7 +48,8 @@ def contain(image: Image.Image, size: tuple[int, int], margin: float) -> Image.I
 
 
 def main() -> None:
-    master = black_to_alpha(Image.open(MASTER))
+    black_master = Image.open(MASTER).convert("RGBA")
+    master = black_to_alpha(black_master)
     master.save(ASSETS / "fmost_brain_logo_final_transparent.png", optimize=True)
     cropped = alpha_crop(master)
 
@@ -58,7 +60,13 @@ def main() -> None:
     black.alpha_composite(logo)
     black.convert("RGB").save(ASSETS / "fmost_brain_logo_black.png", optimize=True)
 
-    icon_master = contain(cropped, (1024, 1024), margin=0.07)
+    # Keep the launcher background transparent so Windows can composite the
+    # icon naturally on light, dark, and custom desktop themes.
+    icon_master = contain(
+        cropped,
+        (1024, 1024),
+        margin=0.07,
+    )
     icon_master.save(ASSETS / "fmost_brain_icon.png", optimize=True)
 
     icon_dir = ASSETS / "icon_sizes"
