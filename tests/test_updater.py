@@ -67,6 +67,18 @@ class UpdaterTests(unittest.TestCase):
             "fMOST-Brain-Viewer-Setup-2.3.2-win64.exe",
         )
 
+    def test_windows_update_requests_elevation_and_closes_running_app(self) -> None:
+        shell_execute = mock.Mock(return_value=42)
+        fake_windll = mock.Mock()
+        fake_windll.shell32.ShellExecuteW = shell_execute
+        with (
+            mock.patch.object(viewer.sys, "platform", "win32"),
+            mock.patch.object(viewer.ctypes, "windll", fake_windll, create=True),
+        ):
+            self.assertTrue(viewer.launch_update_installer(Path("update.exe")))
+        self.assertEqual(shell_execute.call_args.args[1], "runas")
+        self.assertIn("/FORCECLOSEAPPLICATIONS", shell_execute.call_args.args[3])
+
     def test_atomic_download_verifies_sha256_and_cleans_part(self) -> None:
         payload = b"synthetic installer"
         asset = {
@@ -90,6 +102,21 @@ class UpdaterTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "SHA-256"):
                     viewer.download_release_asset(asset, destination)
             self.assertFalse(destination.with_suffix(".exe.part").exists())
+
+    def test_download_rejects_missing_or_invalid_digest_before_network_access(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "setup.exe"
+            for digest in (None, "", "md5:" + "0" * 32, "sha256:invalid"):
+                asset = {
+                    "browser_download_url": "https://example.invalid/setup.exe",
+                    "digest": digest,
+                }
+                with (
+                    mock.patch.object(viewer.urllib.request, "urlopen") as urlopen,
+                    self.assertRaisesRegex(ValueError, "missing or invalid"),
+                ):
+                    viewer.download_release_asset(asset, destination)
+                urlopen.assert_not_called()
 
 
 if __name__ == "__main__":

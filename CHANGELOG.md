@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.3.7 — 2026-08-30
+
+- Refuse to run downloaded update installers when GitHub SHA-256 metadata is missing or invalid.
+- Keep the viewer open when automatic session saving fails, with Retry, Discard, and Cancel choices.
+- Remove incomplete `.part` session files after failed saves.
+- Require release tags to be contained in `main` before and after GitHub publication.
+
+## 2.3.6 — 2026-08-28
+
+- Give the application, executable, and Windows icon a true transparent background.
+- Request elevation for in-app updates so protected legacy installation directories can be replaced.
+- Ask the installer to close applications and DLLs that still hold destination files open.
+
+## 2.3.5 — 2026-08-28
+
+- Select and add an atlas search result with one left click instead of a double-click.
+- Adopt the pearl-white anatomical brain artwork as the primary application and Windows icon.
+- Preserve the previous line-art identity under `assets/lite` for a possible lightweight edition.
+- Keep the Windows icon on its approved black field for reliable small-size rendering.
+- Remove the startup reveal and fade transitions in favor of a fast, static startup screen.
+
 ## 2.3.4 — 2026-08-27
 
 - Render enlarged axons as continuous smooth tubes instead of segmented blocks.

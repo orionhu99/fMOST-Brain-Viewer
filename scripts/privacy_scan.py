@@ -32,6 +32,15 @@ ALLOWED_REPOSITORY_IMAGES = {
     "fmost_brain_logo_final_transparent.png",
     "fmost_brain_viewer.ico",
     *(f"fmost_brain_icon_{size}.png" for size in (16, 24, 32, 48, 64, 128, 256)),
+    *(f"fmost_brain_lite_{name}" for name in (
+        "icon.png",
+        "logo.png",
+        "logo_black.png",
+        "logo_final_black.png",
+        "logo_final_transparent.png",
+        "viewer.ico",
+    )),
+    *(f"fmost_brain_lite_icon_{size}.png" for size in (16, 24, 32, 48, 64, 128, 256)),
 }
 
 
