@@ -209,6 +209,10 @@ def fetch_github_releases() -> list[dict]:
 
 def download_release_asset(asset: dict, destination: Path, progress_callback=None) -> Path:
     """Download one GitHub release asset atomically and verify its digest."""
+    expected = str(asset.get("digest", "")).strip()
+    expected_match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", expected)
+    if expected_match is None:
+        raise ValueError("Installer SHA-256 metadata is missing or invalid.")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".part")
     request = urllib.request.Request(
@@ -229,8 +233,7 @@ def download_release_asset(asset: dict, destination: Path, progress_callback=Non
                 downloaded += len(block)
                 if progress_callback is not None:
                     progress_callback(downloaded, total)
-        expected = str(asset.get("digest", ""))
-        if expected.startswith("sha256:") and digest.hexdigest() != expected[7:].casefold():
+        if digest.hexdigest() != expected_match.group(1).casefold():
             raise ValueError("Downloaded installer SHA-256 does not match GitHub metadata.")
         temporary.replace(destination)
         return destination
@@ -4153,17 +4156,50 @@ class ViewerWindow(QtWidgets.QMainWindow):
         except OSError as exc:
             QtWidgets.QMessageBox.critical(self, "Cannot save session", str(exc))
             return False
+        finally:
+            if temporary.exists():
+                try:
+                    temporary.unlink()
+                except OSError:
+                    LOGGER.warning("Could not remove incomplete session file: %s", temporary)
         self.session_path = path
         self.status.setText(f"Session saved: {path}")
+        return True
+
+    def _confirm_session_close(self) -> bool:
+        if self.session_path is None:
+            return True
+        while not self._save_session():
+            message = QtWidgets.QMessageBox(self)
+            message.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+            message.setWindowTitle("Session was not saved")
+            message.setText("The current session could not be saved.")
+            message.setInformativeText(
+                "Retry saving, discard the unsaved session changes, or cancel closing."
+            )
+            retry = message.addButton(
+                "Retry", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+            )
+            discard = message.addButton(
+                "Discard", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
+            )
+            message.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+            message.exec()
+            if message.clickedButton() is retry:
+                continue
+            return message.clickedButton() is discard
         return True
 
     def _replace_with_projects(
         self, projects: list[tuple[str, Path]], session_path=None, session_config=None
     ) -> None:
+        if not self._confirm_session_close():
+            return
         self._replacement_window = ViewerWindow(
             projects, session_path=session_path, session_config=session_config
         )
         self._replacement_window.show()
+        self._skip_session_save_once = True
         self.close()
 
     def _new_session(self) -> None:
@@ -4198,8 +4234,11 @@ class ViewerWindow(QtWidgets.QMainWindow):
                 )
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self.session_path is not None:
-            self._save_session()
+        if getattr(self, "_skip_session_save_once", False):
+            self._skip_session_save_once = False
+        elif not self._confirm_session_close():
+            event.ignore()
+            return
         if self.update_check_thread is not None and self.update_check_thread.isRunning():
             self.update_check_thread.quit()
             self.update_check_thread.wait(16000)

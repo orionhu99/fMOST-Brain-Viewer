@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.7 — 2026-08-30
+
+- Refuse to run downloaded update installers when GitHub SHA-256 metadata is missing or invalid.
+- Keep the viewer open when automatic session saving fails, with Retry, Discard, and Cancel choices.
+- Remove incomplete `.part` session files after failed saves.
+- Require release tags to be contained in `main` before and after GitHub publication.
+
 ## 2.3.6 — 2026-08-28
 
 - Give the application, executable, and Windows icon a true transparent background.

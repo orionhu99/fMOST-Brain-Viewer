@@ -103,6 +103,21 @@ class UpdaterTests(unittest.TestCase):
                     viewer.download_release_asset(asset, destination)
             self.assertFalse(destination.with_suffix(".exe.part").exists())
 
+    def test_download_rejects_missing_or_invalid_digest_before_network_access(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "setup.exe"
+            for digest in (None, "", "md5:" + "0" * 32, "sha256:invalid"):
+                asset = {
+                    "browser_download_url": "https://example.invalid/setup.exe",
+                    "digest": digest,
+                }
+                with (
+                    mock.patch.object(viewer.urllib.request, "urlopen") as urlopen,
+                    self.assertRaisesRegex(ValueError, "missing or invalid"),
+                ):
+                    viewer.download_release_asset(asset, destination)
+                urlopen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
