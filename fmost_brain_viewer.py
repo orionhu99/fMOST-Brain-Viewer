@@ -1393,6 +1393,49 @@ def color_icon(color: str) -> QtGui.QIcon:
     return QtGui.QIcon(pixmap)
 
 
+class NeuronListWidget(QtWidgets.QListWidget):
+    colorIconDoubleClicked = QtCore.Signal(QtWidgets.QListWidgetItem)
+
+    def _decoration_rect(self, item: QtWidgets.QListWidgetItem) -> QtCore.QRect:
+        index = self.indexFromItem(item)
+        option = QtWidgets.QStyleOptionViewItem()
+        option.initFrom(self.viewport())
+        option.rect = self.visualRect(index)
+        option.features = (
+            QtWidgets.QStyleOptionViewItem.ViewItemFeature.HasDisplay
+            | QtWidgets.QStyleOptionViewItem.ViewItemFeature.HasDecoration
+            | QtWidgets.QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        )
+        option.icon = item.icon()
+        icon_size = self.iconSize()
+        if not icon_size.isValid():
+            extent = self.style().pixelMetric(
+                QtWidgets.QStyle.PixelMetric.PM_SmallIconSize, option, self
+            )
+            icon_size = QtCore.QSize(extent, extent)
+        option.decorationSize = icon_size
+        option.text = item.text()
+        option.checkState = item.checkState()
+        return self.style().subElementRect(
+            QtWidgets.QStyle.SubElement.SE_ItemViewItemDecoration,
+            option,
+            self.viewport(),
+        )
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        position = event.position().toPoint()
+        item = self.itemAt(position)
+        if (
+            item is not None
+            and item.data(QtCore.Qt.ItemDataRole.UserRole) is not None
+            and self._decoration_rect(item).contains(position)
+        ):
+            self.colorIconDoubleClicked.emit(item)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 def _surface_from_mask(mask: np.ndarray, spacing: tuple[float, float, float], origin) -> pv.PolyData:
     grid = pv.ImageData(dimensions=mask.shape, spacing=spacing, origin=origin)
     grid.point_data["mask"] = mask.astype(np.uint8).ravel(order="F")
@@ -2620,8 +2663,10 @@ class ViewerWindow(QtWidgets.QMainWindow):
         axon_buttons.addWidget(axon_all)
         axon_buttons.addWidget(axon_none)
         axon_layout.addLayout(axon_buttons)
-        self.neuron_list = QtWidgets.QListWidget()
-        self.neuron_list.setToolTip("Double-click a neuron to set its independent color")
+        self.neuron_list = NeuronListWidget()
+        self.neuron_list.setToolTip(
+            "Check a neuron to show it; double-click its color square to change color"
+        )
         self.neuron_region_list = QtWidgets.QListWidget()
         self.neuron_region_list.setToolTip(
             "Check a soma region to show all neurons whose somas are in that region"
@@ -2672,7 +2717,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.region_opacity.valueChanged.connect(self._set_region_opacity)
         self.region_list.itemChanged.connect(self._region_toggled)
         self.neuron_list.itemChanged.connect(self._neuron_toggled)
-        self.neuron_list.itemDoubleClicked.connect(self._choose_neuron_color)
+        self.neuron_list.colorIconDoubleClicked.connect(self._choose_neuron_color)
         self.neuron_region_list.itemChanged.connect(self._neuron_region_toggled)
         self.dataset_list.itemChanged.connect(self._dataset_toggled)
         self.color_mode.currentTextChanged.connect(self._set_neuron_mode)

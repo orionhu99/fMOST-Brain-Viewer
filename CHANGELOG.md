@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.8 — 2026-09-06
+
+- Keep rapid clicks and double-clicks on neuron checkboxes limited to visibility changes.
+- Open the independent neuron color picker only when its color swatch is double-clicked.
+- Clarify the neuron-list tooltip for visibility and color editing.
+
 ## 2.3.7 — 2026-08-30
 
 - Refuse to run downloaded update installers when GitHub SHA-256 metadata is missing or invalid.
