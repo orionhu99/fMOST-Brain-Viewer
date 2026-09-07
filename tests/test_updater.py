@@ -27,10 +27,10 @@ class UpdaterTests(unittest.TestCase):
         successful = []
         worker = viewer.UpdateCheckWorker()
         worker.completed.connect(lambda releases, error: successful.append((releases, error)))
-        payload = [{"tag_name": "v2.4.0", "draft": False, "prerelease": False}]
+        payload = [{"tag_name": "v9.0.0", "draft": False, "prerelease": False}]
         with mock.patch.object(viewer, "fetch_github_releases", return_value=payload):
             worker.run()
-        self.assertEqual(successful[0][0][0]["tag_name"], "v2.4.0")
+        self.assertEqual(successful[0][0][0]["tag_name"], "v9.0.0")
         self.assertIsNone(successful[0][1])
 
         failed = []
@@ -67,7 +67,7 @@ class UpdaterTests(unittest.TestCase):
             "fMOST-Brain-Viewer-Setup-2.3.2-win64.exe",
         )
 
-    def test_windows_update_requests_elevation_and_closes_running_app(self) -> None:
+    def test_windows_update_uses_normal_permissions_without_forced_close(self) -> None:
         shell_execute = mock.Mock(return_value=42)
         fake_windll = mock.Mock()
         fake_windll.shell32.ShellExecuteW = shell_execute
@@ -76,13 +76,13 @@ class UpdaterTests(unittest.TestCase):
             mock.patch.object(viewer.ctypes, "windll", fake_windll, create=True),
         ):
             self.assertTrue(viewer.launch_update_installer(Path("update.exe")))
-        self.assertEqual(shell_execute.call_args.args[1], "runas")
-        self.assertIn("/FORCECLOSEAPPLICATIONS", shell_execute.call_args.args[3])
+        self.assertEqual(shell_execute.call_args.args[1], "open")
+        self.assertIn("/NOFORCECLOSEAPPLICATIONS", shell_execute.call_args.args[3])
 
     def test_atomic_download_verifies_sha256_and_cleans_part(self) -> None:
         payload = b"synthetic installer"
         asset = {
-            "browser_download_url": "https://example.invalid/setup.exe",
+            "browser_download_url": "https://github.com/orionhu99/fMOST-Brain-Viewer/releases/download/v9.0.0/setup.exe",
             "size": len(payload),
             "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
         }

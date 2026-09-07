@@ -15,7 +15,7 @@ class SessionReliabilityTests(unittest.TestCase):
             path = Path(directory) / "analysis.fmost-session.json"
             window = SimpleNamespace(
                 session_path=path,
-                _session_payload=lambda _path: {"version": 1},
+                _session_payload=lambda _path: {"format": "fmost-brain-viewer-session", "format_version": 2, "datasets": []},
                 status=mock.Mock(),
             )
             with (

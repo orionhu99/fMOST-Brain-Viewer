@@ -155,6 +155,7 @@ class Viewer231ImprovementTests(unittest.TestCase):
                 ontology={42: {"acronym": "TEST", "name": "Test structure"}},
                 status=mock.Mock(),
                 annotation=types.SimpleNamespace(path=annotation_path),
+                atlas_cache=Path(directory) / "cache",
             )
             with (
                 mock.patch.object(viewer, "CACHE_ROOT", Path(directory) / "cache"),

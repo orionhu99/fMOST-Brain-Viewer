@@ -30,6 +30,15 @@ from pyvistaqt import QtInteractor
 from scipy import ndimage
 
 from version import __version__
+from viewer_data import read_swc_with_ids, read_swc
+from viewer_session import read_session, read_legacy_session, validate_session, atomic_json
+from viewer_cache import read_surface_cache, save_surface_cache
+from viewer_updater import (
+    AtlasSetupCancelled, version_tuple, newer_stable_releases,
+    release_installer_asset, fetch_github_releases, download_release_asset,
+    launch_update_installer, DownloadDialog,
+)
+import uuid
 
 DATA_ROOT = Path.home()
 ATLAS_ROOT = Path()
@@ -99,8 +108,7 @@ EXPORT_CONTENT_LABELS = {
     "legend": "Brain-region legend",
 }
 
-class AtlasSetupCancelled(Exception):
-    pass
+
 
 
 def derived_cache_root(signature: str) -> Path:
@@ -157,105 +165,6 @@ def region_search_matches(ontology: dict[int, dict], query: str) -> list[int]:
             ranked.append((key, entry[0]))
     ranked.sort()
     return [region_id for _key, region_id in ranked]
-
-
-def version_tuple(value: str) -> tuple[int, int, int] | None:
-    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", value.strip())
-    return tuple(map(int, match.groups())) if match else None
-
-
-def newer_stable_releases(payload, current_version: str) -> list[dict]:
-    """Return newer, published stable releases in descending version order."""
-    current = version_tuple(current_version)
-    if current is None:
-        raise ValueError(f"Invalid current version: {current_version}")
-    releases = []
-    for release in payload:
-        version = version_tuple(str(release.get("tag_name", "")))
-        if (
-            version is not None
-            and version > current
-            and not release.get("draft", False)
-            and not release.get("prerelease", False)
-        ):
-            releases.append((version, release))
-    releases.sort(key=lambda entry: entry[0], reverse=True)
-    return [release for _version, release in releases]
-
-
-def release_installer_asset(release: dict) -> dict | None:
-    version = version_tuple(str(release.get("tag_name", "")))
-    if version is None:
-        return None
-    expected = f"fMOST-Brain-Viewer-Setup-{'.'.join(map(str, version))}-win64.exe"
-    return next(
-        (asset for asset in release.get("assets", []) if asset.get("name") == expected),
-        None,
-    )
-
-
-def fetch_github_releases() -> list[dict]:
-    request = urllib.request.Request(
-        GITHUB_RELEASES_API,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": f"fMOST-Brain-Viewer/{__version__}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        return json.load(response)
-
-
-def download_release_asset(asset: dict, destination: Path, progress_callback=None) -> Path:
-    """Download one GitHub release asset atomically and verify its digest."""
-    expected = str(asset.get("digest", "")).strip()
-    expected_match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", expected)
-    if expected_match is None:
-        raise ValueError("Installer SHA-256 metadata is missing or invalid.")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_suffix(destination.suffix + ".part")
-    request = urllib.request.Request(
-        str(asset["browser_download_url"]),
-        headers={"User-Agent": f"fMOST-Brain-Viewer/{__version__}"},
-    )
-    digest = hashlib.sha256()
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as stream:
-            total = int(response.headers.get("Content-Length", asset.get("size", 0)))
-            downloaded = 0
-            while True:
-                block = response.read(1024 * 1024)
-                if not block:
-                    break
-                stream.write(block)
-                digest.update(block)
-                downloaded += len(block)
-                if progress_callback is not None:
-                    progress_callback(downloaded, total)
-        if digest.hexdigest() != expected_match.group(1).casefold():
-            raise ValueError("Downloaded installer SHA-256 does not match GitHub metadata.")
-        temporary.replace(destination)
-        return destination
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
-def launch_update_installer(installer: Path) -> bool:
-    """Start an update with the permissions required to replace an old install."""
-    if sys.platform == "win32":
-        result = ctypes.windll.shell32.ShellExecuteW(
-            None,
-            "runas",
-            str(installer),
-            "/CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS",
-            None,
-            1,
-        )
-        return int(result) > 32
-    launched = QtCore.QProcess.startDetached(str(installer), [])
-    return bool(launched[0] if isinstance(launched, tuple) else launched)
 
 
 def configure_logging() -> Path:
@@ -434,7 +343,7 @@ def _quick_file_fingerprint(path: Path) -> dict:
 
 
 def _atlas_file_identities(folder: Path) -> dict[str, dict]:
-    cache_root = folder / "viewer_cache"
+    cache_root = CACHE_BASE / "identities" / hashlib.sha256(str(folder.resolve()).encode()).hexdigest()[:24]
     cache_root.mkdir(parents=True, exist_ok=True)
     cache_path = cache_root / "atlas_file_identities_v1.json"
     try:
@@ -766,7 +675,7 @@ def prepare_annotation_for_memmap(
         NRRD_DTYPE_CODES[dtype_name]
     ).itemsize
 
-    cache_root = atlas_root / "viewer_cache"
+    cache_root = CACHE_BASE / "raw" / (source_sha256 or _sha256_file(annotation))
     cache_root.mkdir(parents=True, exist_ok=True)
     raw_path = cache_root / "annotation_10_raw.nrrd"
     identity_path = cache_root / "annotation_10_raw.identity.json"
@@ -821,6 +730,8 @@ def prepare_annotation_for_memmap(
                         chunk = payload.read(8 * 1024 * 1024)
                         if not chunk:
                             break
+                        if written + len(chunk) > expected_bytes:
+                            raise IOError("Decompressed annotation exceeds declared payload size.")
                         output.write(chunk)
                         written += len(chunk)
                         elapsed = max(time.monotonic() - started, 0.01)
@@ -902,6 +813,7 @@ class BrainDataset:
     soma_points: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=float))
     soma_point_by_id: dict[int, np.ndarray] = field(default_factory=dict)
     soma_regions: dict[int, int | None] = field(default_factory=dict)
+    soma_diagnostics: dict = field(default_factory=dict)
     outside_soma_count: int = 0
     manual_region_path: Path | None = None
     manual_region_applied: int = 0
@@ -981,56 +893,6 @@ def activate_project(project: Path, brain_id: str) -> None:
     global DATA_ROOT, ACTIVE_PROJECT
     ACTIVE_PROJECT = project
     DATA_ROOT = project.parent
-
-
-def read_swc_with_ids(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    parsed_rows = []
-    with path.open("r", encoding="utf-8", errors="replace") as stream:
-        for line_number, line in enumerate(stream, start=1):
-            text = line.replace("\x00", "").strip()
-            if not text or text.startswith("#"):
-                continue
-            fields = text.split()
-            if len(fields) < 7:
-                continue
-            try:
-                parsed_rows.append([float(value) for value in fields[:7]])
-            except ValueError as exc:
-                raise ValueError(f"Invalid SWC row in {path}, line {line_number}") from exc
-    if not parsed_rows:
-        raise ValueError(f"No valid seven-column SWC rows found: {path}")
-    rows = np.asarray(parsed_rows, dtype=float)
-    if not np.isfinite(rows).all():
-        raise ValueError(f"SWC contains a non-finite value: {path}")
-    if not np.equal(rows[:, 0], np.rint(rows[:, 0])).all():
-        raise ValueError(f"SWC node IDs must be integers: {path}")
-    if not np.equal(rows[:, 6], np.rint(rows[:, 6])).all():
-        raise ValueError(f"SWC parent IDs must be integers: {path}")
-    ids = np.rint(rows[:, 0]).astype(np.int64)
-    if len(np.unique(ids)) != len(ids):
-        duplicates = sorted(
-            int(node_id) for node_id, count in Counter(map(int, ids)).items() if count > 1
-        )
-        preview = ", ".join(map(str, duplicates[:8]))
-        suffix = "..." if len(duplicates) > 8 else ""
-        raise ValueError(f"SWC contains duplicate node ID(s) {preview}{suffix}: {path}")
-    points = rows[:, 2:5].astype(np.float32)
-    parents = np.rint(rows[:, 6]).astype(np.int64)
-    index_by_id = {node_id: index for index, node_id in enumerate(ids)}
-    edges = np.asarray(
-        [
-            (index_by_id[parent], index)
-            for index, parent in enumerate(parents)
-            if parent in index_by_id
-        ],
-        dtype=np.int64,
-    )
-    return ids, points, edges
-
-
-def read_swc(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    _, points, edges = read_swc_with_ids(path)
-    return points, edges
 
 
 def line_mesh(points: np.ndarray, edges: np.ndarray) -> pv.PolyData:
@@ -1145,6 +1007,9 @@ class RawNrrdMemmap:
             source = np.asarray(self.data[:, :, index])
         return np.array(source, dtype=self.dtype.newbyteorder("="), copy=True)
 
+    def close(self) -> None:
+        self.data._mmap.close()
+
     def value_at(self, world_index: np.ndarray) -> int:
         x, y, z = map(int, world_index)
         storage_index = (z, y, x) if self.allen_axis_order else (x, y, z)
@@ -1185,6 +1050,7 @@ def classify_somas(
     annotation: RawNrrdMemmap,
     soma_ids: np.ndarray,
     soma_points: np.ndarray,
+    *, strict: bool = False, diagnostics: dict | None = None,
 ) -> tuple[dict[int, int | None], int]:
     result: dict[int, int | None] = {}
     outside_count = 0
@@ -1195,9 +1061,13 @@ def classify_somas(
         if np.any(index < 0) or np.any(index >= shape):
             result[int(soma_id)] = None
             outside_count += 1
+            if diagnostics is not None:
+                diagnostics[int(soma_id)] = {"source": "outside", "raw_value": None, "atlas_region": None}
             continue
         raw = annotation.value_at(index)
-        if annotation.is_background(raw):
+        original_raw = raw
+        method = "direct" if not annotation.is_background(raw) else "unassigned"
+        if annotation.is_background(raw) and not strict:
             low = np.maximum(index - 2, 0)
             high = np.minimum(index + 3, shape)
             values = annotation.world_crop(low, high).ravel()
@@ -1206,7 +1076,12 @@ def classify_somas(
             else:
                 valid = values[(values != 0) & (values != 65535)]
             raw = Counter(map(int, valid)).most_common(1)[0][0] if len(valid) else 0
-        result[int(soma_id)] = annotation.atlas_id(raw) if raw else None
+            if not annotation.is_background(raw):
+                method = "neighborhood"
+        region = None if annotation.is_background(raw) else annotation.atlas_id(raw)
+        result[int(soma_id)] = region
+        if diagnostics is not None:
+            diagnostics[int(soma_id)] = {"source": method, "raw_value": original_raw, "atlas_region": region}
     return result, outside_count
 
 
@@ -1448,10 +1323,11 @@ def _surface_from_mask(mask: np.ndarray, spacing: tuple[float, float, float], or
 
 
 def load_or_create_whole_brain_surface(annotation: RawNrrdMemmap) -> pv.PolyData:
-    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    cache = CACHE_ROOT / "whole_brain_surface_step4_v3.vtp"
-    if cache.exists() and cache.stat().st_mtime >= annotation.path.stat().st_mtime:
-        return pv.read(cache)
+    getattr(annotation, "cache_root", CACHE_ROOT).mkdir(parents=True, exist_ok=True)
+    cache = getattr(annotation, "cache_root", CACHE_ROOT) / "whole_brain_surface_step4_v3.vtp"
+    cached = read_surface_cache(cache, annotation.path)
+    if cached is not None:
+        return cached
     step = 4
     mask = annotation.world_labels(step) != 0
     mask = ndimage.binary_closing(mask, iterations=1)
@@ -1463,7 +1339,7 @@ def load_or_create_whole_brain_surface(annotation: RawNrrdMemmap) -> pv.PolyData
     surface = surface.connectivity(extraction_mode="largest").extract_surface(
         algorithm="dataset_surface"
     ).clean()
-    surface.save(cache)
+    save_surface_cache(surface, cache)
     return surface
 
 
@@ -1471,13 +1347,14 @@ def load_or_create_region_surfaces(
     annotation: RawNrrdMemmap,
     region_ids: list[int],
 ) -> dict[int, pv.PolyData]:
-    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    getattr(annotation, "cache_root", CACHE_ROOT).mkdir(parents=True, exist_ok=True)
     surfaces: dict[int, pv.PolyData] = {}
     missing: list[int] = []
     for region_id in region_ids:
-        cache = CACHE_ROOT / f"region_{region_id}_step2.vtp"
-        if cache.exists() and cache.stat().st_mtime >= annotation.path.stat().st_mtime:
-            surfaces[region_id] = pv.read(cache)
+        cache = getattr(annotation, "cache_root", CACHE_ROOT) / f"region_{region_id}_step2.vtp"
+        cached = read_surface_cache(cache, annotation.path)
+        if cached is not None:
+            surfaces[region_id] = cached
         else:
             missing.append(region_id)
     if not missing:
@@ -1501,8 +1378,8 @@ def load_or_create_region_surfaces(
         padded = np.pad(crop, 1)
         origin = (lower - 1) * np.asarray(spacing)
         surface = _surface_from_mask(padded, spacing, origin)
-        cache = CACHE_ROOT / f"region_{region_id}_step2.vtp"
-        surface.save(cache)
+        cache = getattr(annotation, "cache_root", CACHE_ROOT) / f"region_{region_id}_step2.vtp"
+        save_surface_cache(surface, cache)
         surfaces[region_id] = surface
     return surfaces
 
@@ -1513,10 +1390,11 @@ def load_or_create_structure_surface(
     region_id: int,
 ) -> pv.PolyData | None:
     """Create a parent structure from its own and all descendant atlas labels."""
-    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    cache = CACHE_ROOT / f"region_tree_{region_id}_step2.vtp"
-    if cache.exists() and cache.stat().st_mtime >= annotation.path.stat().st_mtime:
-        return pv.read(cache)
+    getattr(annotation, "cache_root", CACHE_ROOT).mkdir(parents=True, exist_ok=True)
+    cache = getattr(annotation, "cache_root", CACHE_ROOT) / f"region_tree_{region_id}_step2.vtp"
+    cached = read_surface_cache(cache, annotation.path)
+    if cached is not None:
+        return cached
     stored_values = [
         annotation.stored_value(value)
         for value in structure_family_ids(ontology, region_id)
@@ -1549,13 +1427,7 @@ def load_or_create_structure_surface(
     spacing = tuple(value * step for value in annotation.spacing)
     origin = (lower + local_lower - 1) * np.asarray(spacing)
     surface = _surface_from_mask(padded, spacing, origin)
-    temporary = cache.with_name(cache.stem + ".part.vtp")
-    try:
-        surface.save(temporary)
-        temporary.replace(cache)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+    save_surface_cache(surface, cache)
     return surface
 
 
@@ -1588,8 +1460,8 @@ def sparse_label_bounds(labels: np.ndarray, is_background, chunk_depth: int = 16
 
 def load_or_create_region_bounds(annotation: RawNrrdMemmap) -> dict[str, list[int]]:
     """Build a one-time 20 um label bounding-box index for local surface extraction."""
-    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    cache = CACHE_ROOT / f"region_bounds_step2_v{REGION_CACHE_VERSION}.json"
+    getattr(annotation, "cache_root", CACHE_ROOT).mkdir(parents=True, exist_ok=True)
+    cache = getattr(annotation, "cache_root", CACHE_ROOT) / f"region_bounds_step2_v{REGION_CACHE_VERSION}.json"
     if cache.exists() and cache.stat().st_mtime >= annotation.path.stat().st_mtime:
         try:
             return json.loads(cache.read_text(encoding="utf-8"))["bounds"]
@@ -1647,7 +1519,7 @@ def prepare_region_library(
         if surface is not None and surface.n_points:
             completed += 1
         del surface
-    manifest = CACHE_ROOT / f"region_library_{mode}_v{REGION_CACHE_VERSION}.json"
+    manifest = getattr(annotation, "cache_root", CACHE_ROOT) / f"region_library_{mode}_v{REGION_CACHE_VERSION}.json"
     temporary = manifest.with_suffix(".part.json")
     try:
         temporary.write_text(json.dumps({
@@ -1778,7 +1650,7 @@ def run_region_cache_job(
 
 
 def region_library_is_current(annotation: RawNrrdMemmap, mode: str = "standard") -> bool:
-    manifest = CACHE_ROOT / f"region_library_{mode}_v{REGION_CACHE_VERSION}.json"
+    manifest = getattr(annotation, "cache_root", CACHE_ROOT) / f"region_library_{mode}_v{REGION_CACHE_VERSION}.json"
     if not manifest.is_file():
         return False
     try:
@@ -2285,6 +2157,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.update_check_progress: QtWidgets.QProgressDialog | None = None
         self.startup_progress = progress
         self.session_path = session_path
+        self.strict_soma_labels = bool((session_config or {}).get("strict_soma_labels", False))
         self.config = (
             session_config if session_config is not None else self._legacy_config(projects[0])
         )
@@ -2313,7 +2186,11 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.template_range = None
         self.current_brain_style = "Surface"
         self._report_progress(5, "Reading soma and atlas metadata...")
+        self.atlas_signature = ATLAS_SIGNATURE
+        self.atlas_template = TEMPLATE_25
+        self.atlas_cache = CACHE_ROOT
         self.annotation = RawNrrdMemmap(ANNOTATION_10)
+        self.annotation.cache_root = self.atlas_cache
         self.ontology = load_ontology()
         dataset_settings = {
             str(entry.get("key", "")): entry
@@ -2350,8 +2227,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
             for dataset in self.datasets.values():
                 legacy_path = project_paths(dataset.brain_id, dataset.project)[2]
                 try:
-                    legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
+                    legacy = read_legacy_session(legacy_path)
+                except (OSError, ValueError, UnicodeError, RecursionError):
                     continue
                 for stem, color in legacy.get("manual_colors", {}).items():
                     self.manual_colors.setdefault(f"{dataset.key}::{stem}", color)
@@ -2369,6 +2246,12 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._load_scene()
         self._restore_config()
+        self._saved_state = self._state_token()
+        self.recovery_path = LOCAL_APP_DATA / "fMOST Brain Viewer" / "recovery" / (uuid.uuid4().hex + ".fmost-session.json")
+        self.recovery_timer = QtCore.QTimer(self)
+        self.recovery_timer.setInterval(30000)
+        self.recovery_timer.timeout.connect(self._write_recovery)
+        self.recovery_timer.start()
         self._report_progress(
             100,
             f"Ready: {len(self.datasets)} brains; {len(self.neuron_items)} neurons; "
@@ -2394,7 +2277,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if not config_path.exists():
             return {}
         try:
-            legacy = json.loads(config_path.read_text(encoding="utf-8"))
+            legacy = read_legacy_session(config_path)
             legacy["manual_colors"] = {
                 f"{dataset_key(brain_id, folder)}::{stem}": color
                 for stem, color in legacy.get("manual_colors", {}).items()
@@ -2404,7 +2287,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
                 for stem in legacy.get("visible_neurons", [])
             ]
             return legacy
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError, UnicodeError, RecursionError):
             return {}
 
     def _read_dataset(
@@ -2418,7 +2301,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if key in self.datasets:
             return self.datasets[key]
         soma_ids, soma_points, _ = read_swc_with_ids(soma_path)
-        soma_regions, outside = classify_somas(self.annotation, soma_ids, soma_points)
+        diagnostics = {}
+        soma_regions, outside = classify_somas(self.annotation, soma_ids, soma_points, strict=self.strict_soma_labels, diagnostics=diagnostics)
         manual_path = manual_soma_region_csv(brain_id, project)
         manual_regions: dict[int, int | None] = {}
         manual_ignored = 0
@@ -2428,6 +2312,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
                     manual_path, self.ontology, set(map(int, soma_ids))
                 )
                 soma_regions.update(manual_regions)
+                for soma_id in manual_regions:
+                    diagnostics[soma_id]["source"] = "manual"
             except OSError:
                 manual_ignored = 1
         dataset = BrainDataset(
@@ -2444,6 +2330,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
                 int(soma_id): point for soma_id, point in zip(soma_ids, soma_points)
             },
             soma_regions=soma_regions,
+            soma_diagnostics=diagnostics,
             outside_soma_count=outside,
             manual_region_path=manual_path,
             manual_region_applied=len(manual_regions),
@@ -2456,6 +2343,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction("New session...", self._new_session)
         file_menu.addAction("Open session...", self._open_session)
+        file_menu.addAction("Recover unsaved session...", self._recover_session)
+        file_menu.addAction("Export soma diagnostics...", self._export_soma_diagnostics)
         self.save_session_action = file_menu.addAction("Save session", self._save_session)
         file_menu.addAction(
             "Save session as...", lambda _checked=False: self._save_session(save_as=True)
@@ -2478,6 +2367,11 @@ class ViewerWindow(QtWidgets.QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction("Exit", self.close)
         settings_menu = self.menuBar().addMenu("Settings")
+        self.strict_labels_action = settings_menu.addAction("Strict soma labels (no neighborhood inference)")
+        self.strict_labels_action.setCheckable(True)
+        self.strict_labels_action.setChecked(self.strict_soma_labels)
+        self.strict_labels_action.triggered.connect(self._set_strict_soma_labels)
+        settings_menu.addAction("Manage atlas cache...", self._manage_cache)
         self.mouse_wheel_action = settings_menu.addAction(
             "Enable mouse-wheel parameter adjustment"
         )
@@ -2855,6 +2749,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(object, object)
     def _update_check_completed(self, releases, error) -> None:
+        if self.update_check_thread is not None and self.update_check_thread.isInterruptionRequested():
+            return
         if self.update_check_progress is not None:
             self.update_check_progress.close()
         if error is not None:
@@ -2895,39 +2791,23 @@ class ViewerWindow(QtWidgets.QMainWindow):
         destination = (
             LOCAL_APP_DATA / "fMOST Brain Viewer" / "updates" / str(asset["name"])
         )
-        progress = QtWidgets.QProgressDialog(
-            "Downloading update...", "Cancel", 0, max(int(asset.get("size", 0)), 1), self
-        )
-        progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
-        progress.setMinimumDuration(0)
-
-        def report(downloaded: int, total: int) -> None:
-            progress.setMaximum(max(total, 1))
-            progress.setValue(downloaded)
-            QtWidgets.QApplication.processEvents()
-            if progress.wasCanceled():
-                raise AtlasSetupCancelled("Update download cancelled.")
-
-        try:
-            installer = download_release_asset(asset, destination, report)
-        except AtlasSetupCancelled:
-            progress.close()
+        download = DownloadDialog(asset, destination, self)
+        if download.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            error = download.worker.error
+            if error is not None and not isinstance(error, AtlasSetupCancelled) and not download.worker.isInterruptionRequested():
+                QtWidgets.QMessageBox.critical(self, "Update download failed", str(error))
             return
-        except Exception as exc:
-            progress.close()
-            LOGGER.exception("Could not download application update")
-            QtWidgets.QMessageBox.critical(
-                self, "Update download failed", f"{type(exc).__name__}: {exc}"
+        if not self._confirm_session_close():
+            return
+        installer = download.worker.result
+        if not launch_update_installer(installer):
+            answer = QtWidgets.QMessageBox.question(
+                self, "Administrator permission", "The installer could not start. Retry with administrator permission for a protected installation?"
             )
-            return
-        progress.close()
-        launched = launch_update_installer(installer)
-        if not launched:
-            QtWidgets.QMessageBox.critical(
-                self, "Cannot start installer", f"Run this file manually:\n{installer}"
-            )
-            return
-        QtWidgets.QApplication.quit()
+            if answer != QtWidgets.QMessageBox.StandardButton.Yes or not launch_update_installer(installer, elevate=True):
+                return
+        self._skip_session_save_once = True
+        self.close()
 
     @QtCore.Slot()
     def _update_check_finished(self) -> None:
@@ -2937,6 +2817,69 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.update_check_progress = None
         if thread is not None:
             thread.deleteLater()
+
+    def _recover_session(self) -> None:
+        folder = LOCAL_APP_DATA / "fMOST Brain Viewer" / "recovery"
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder))) if folder.exists() else None
+        QtWidgets.QMessageBox.information(self, "Session recovery", "Recovery copies are written every 30 seconds while changes are unsaved. Use Open session to select a recovery file; then Save session as to keep a permanent copy.")
+
+    def _export_soma_diagnostics(self) -> None:
+        selected, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export soma diagnostics", str(Path.home() / "soma_diagnostics.csv"), "CSV (*.csv)")
+        if not selected:
+            return
+        path = Path(selected)
+        temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".part")
+        try:
+            with temporary.open("w", encoding="utf-8-sig", newline="") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(["dataset", "soma_id", "x_um", "y_um", "z_um", "source", "raw_voxel", "atlas_region", "final_region"])
+                for dataset in self.datasets.values():
+                    for soma_id, point in zip(dataset.soma_ids, dataset.soma_points):
+                        detail = dataset.soma_diagnostics[int(soma_id)]
+                        writer.writerow([dataset.brain_id, int(soma_id), *map(float, point), detail["source"], detail["raw_value"], detail["atlas_region"], dataset.soma_regions[int(soma_id)]])
+            temporary.replace(path)
+            self.status.setText(f"Diagnostics saved: {path}")
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, "Cannot export diagnostics", str(exc))
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _set_strict_soma_labels(self, enabled: bool) -> None:
+        config = self._session_payload(self.session_path or Path.home() / "state.json")
+        config["strict_soma_labels"] = enabled
+        try:
+            changed = self._replace_with_projects([(d.brain_id, d.project) for d in self.datasets.values()], self.session_path, config)
+            if changed:
+                self._replacement_window._saved_state = ""
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Cannot change labeling mode", str(exc))
+        finally:
+            with QtCore.QSignalBlocker(self.strict_labels_action):
+                self.strict_labels_action.setChecked(self.strict_soma_labels)
+
+    def _manage_cache(self) -> None:
+        root = CACHE_BASE.resolve()
+        files = [p for p in root.rglob("*") if p.is_file()] if root.exists() else []
+        size = sum(p.stat().st_size for p in files)
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Atlas cache")
+        box.setText(f"{size / 1024**3:.2f} GiB in generated caches\n{root}")
+        box.setInformativeText("Clear removes cached surfaces and indexes for this atlas. Active raw volumes and source atlas files are kept; surfaces rebuild when needed.")
+        clear = box.addButton("Clear surface cache", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not clear:
+            return
+        try:
+            namespace = self.atlas_cache.resolve()
+            if not namespace.is_relative_to(root) or namespace == root:
+                raise ValueError("Cache namespace is outside the application cache.")
+            for path in namespace.iterdir():
+                if path.is_file() and not path.is_symlink() and path.suffix in (".vtp", ".json") and path.resolve().is_relative_to(namespace):
+                    path.unlink()
+            self.status.setText("Surface cache cleared; displayed surfaces remain available.")
+        except (OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "Cannot clear cache", str(exc))
 
     def _open_log_folder(self) -> None:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -3010,16 +2953,13 @@ class ViewerWindow(QtWidgets.QMainWindow):
         )
 
     def _create_soma_actor(self, dataset: BrainDataset) -> None:
-        actor_index = sum(
-            value.soma_actor is not None for value in self.datasets.values()
-        )
         dataset.soma_mesh = pv.PolyData(dataset.soma_points.copy())
         dataset.soma_actor = self.plotter.add_points(
             dataset.soma_mesh,
             color=dataset.soma_color,
             point_size=self.soma_size.value(),
             render_points_as_spheres=True,
-            name=f"somas_{actor_index}_{dataset.brain_id}",
+            name="somas_" + hashlib.sha256(dataset.key.encode("utf-8")).hexdigest(),
             render=False,
         )
         dataset.soma_actor.SetVisibility(dataset.enabled)
@@ -3098,7 +3038,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
             line_width=1.0,
             render_lines_as_tubes=False,
             smooth_shading=size > 0,
-            name=f"axon_{len(self.axon_actors)}",
+            name="axon_" + hashlib.sha256(key.encode("utf-8")).hexdigest(),
             render=False,
         )
         actor.SetVisibility(False)
@@ -3161,24 +3101,33 @@ class ViewerWindow(QtWidgets.QMainWindow):
             )
             progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
             progress.setMinimumDuration(0)
-        self.neuron_list.blockSignals(True)
+        failures = []
         loaded = 0
-        for key in keys:
-            if progress is not None and progress.wasCanceled():
-                break
-            self.neuron_items[key].setCheckState(
-                QtCore.Qt.CheckState.Checked if checked
-                else QtCore.Qt.CheckState.Unchecked
-            )
-            self._apply_neuron_visibility(key, checked)
-            if progress is not None and key in load_keys:
-                loaded += 1
-                progress.setValue(loaded)
-                progress.setLabelText(f"Loading axons: {loaded} / {len(load_keys)}")
-                QtWidgets.QApplication.processEvents()
-        self.neuron_list.blockSignals(False)
-        if progress is not None:
-            progress.close()
+        try:
+            with QtCore.QSignalBlocker(self.neuron_list):
+                for key in keys:
+                    if progress is not None and progress.wasCanceled():
+                        break
+                    try:
+                        self._apply_neuron_visibility(key, checked)
+                    except Exception as exc:
+                        self._remove_axon_actor(key)
+                        self.neuron_items[key].setCheckState(QtCore.Qt.CheckState.Unchecked)
+                        failures.append(f"{self.axon_sources[key].name}: {exc}")
+                        LOGGER.exception("Could not load axon %s", key)
+                        continue
+                    self.neuron_items[key].setCheckState(
+                        QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked
+                    )
+                    if progress is not None and key in load_keys:
+                        loaded += 1
+                        progress.setValue(loaded)
+                        QtWidgets.QApplication.processEvents()
+        finally:
+            if progress is not None:
+                progress.close()
+        if failures:
+            QtWidgets.QMessageBox.warning(self, "Some neurons could not be loaded", "\n".join(failures[:20]))
         self._sync_neuron_region_checks()
         self._refresh_soma_points(render=False)
         self._trim_hidden_axon_cache()
@@ -3346,10 +3295,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
             f"Loading {info['acronym']} and descendant region surfaces..."
         )
         QtWidgets.QApplication.processEvents()
-        cache = CACHE_ROOT / f"region_tree_{region_id}_step2.vtp"
-        if cache.exists() and cache.stat().st_mtime >= self.annotation.path.stat().st_mtime:
-            surface = pv.read(cache)
-        else:
+        cache = self.atlas_cache / f"region_tree_{region_id}_step2.vtp"
+        surface = read_surface_cache(cache, self.annotation.path)
+        if surface is None:
             try:
                 surface = run_region_cache_job(
                     self, self.annotation, self.ontology, region_id=region_id
@@ -3392,8 +3340,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.soma_check.setChecked(bool(self.config.get("show_all_somas", True)))
         self.grid_check.setChecked(bool(self.config.get("show_grid", False)))
         self.legend_check.setChecked(bool(self.config.get("show_region_legend", True)))
-        self.current_brain_style = "Surface"
-        self.surface_rendering_action.setChecked(True)
+        self._set_brain_style(self.config.get("brain_style", "Surface"), self.config.get("show_brain", True))
+        self.slice_slider.setValue(min(self.annotation.shape[2] - 1, self.config.get("slice_index", self.annotation.shape[2] // 2)))
+        self.slice_check.setChecked(self.config.get("show_slice", True))
         self.color_mode.setCurrentText(self.config.get("color_mode", "Independent / manual"))
         for region_id in self.config.get("custom_regions", []):
             self._add_custom_region(int(region_id), checked=False, show_errors=False)
@@ -3472,7 +3421,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         progress.show()
         QtWidgets.QApplication.processEvents()
         try:
-            template = load_volume(TEMPLATE_25)
+            template = load_volume(self.atlas_template)
             self.template_range = template.get_data_range("intensity")
             self.volume_actor = self.plotter.add_volume(
                 template, scalars="intensity", cmap="gray",
@@ -3914,13 +3863,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if key is None:
             return
         key = str(key)
-        self._apply_neuron_visibility(
-            key, item.checkState() == QtCore.Qt.CheckState.Checked
-        )
-        self._sync_neuron_region_checks()
-        self._refresh_soma_points(render=False)
-        self._trim_hidden_axon_cache()
-        self.plotter.render()
+        self._apply_bulk_neuron_selection([key], item.checkState() == QtCore.Qt.CheckState.Checked)
 
     def _check_all_regions(self, checked: bool) -> None:
         state = QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked
@@ -4002,20 +3945,32 @@ class ViewerWindow(QtWidgets.QMainWindow):
 
     def _add_projects(self, projects: list[tuple[str, Path]]) -> None:
         added = 0
-        self.neuron_list.blockSignals(True)
-        for brain_id, project in projects:
-            key = dataset_key(brain_id, project)
-            if key in self.datasets:
-                continue
-            dataset = self._read_dataset(
-                brain_id,
-                project,
-                deterministic_color(f"dataset:{brain_id}"),
-            )
-            self._create_soma_actor(dataset)
-            self._index_dataset_neurons(dataset)
-            added += 1
-        self.neuron_list.blockSignals(False)
+        failures = []
+        with QtCore.QSignalBlocker(self.neuron_list):
+            for brain_id, project in projects:
+                key = dataset_key(brain_id, project)
+                if key in self.datasets:
+                    continue
+                dataset = None
+                old_count = self.neuron_list.count()
+                try:
+                    dataset = self._read_dataset(brain_id, project, deterministic_color(f"dataset:{brain_id}"))
+                    self._create_soma_actor(dataset)
+                    self._index_dataset_neurons(dataset)
+                    added += 1
+                except Exception as exc:
+                    failures.append(f"{brain_id}: {exc}")
+                    LOGGER.exception("Could not add dataset %s", brain_id)
+                    if dataset is not None and dataset.soma_actor is not None:
+                        self.plotter.remove_actor(dataset.soma_actor, render=False)
+                    self.datasets.pop(key, None)
+                    while self.neuron_list.count() > old_count:
+                        self.neuron_list.takeItem(self.neuron_list.count() - 1)
+                    for neuron_key in [k for k, owner in self.neuron_datasets.items() if owner == key]:
+                        for mapping in (self.neuron_datasets, self.neuron_items, self.axon_sources, self.neuron_ids, self.neuron_match_status, self.manual_colors):
+                            mapping.pop(neuron_key, None)
+        if failures:
+            QtWidgets.QMessageBox.warning(self, "Some datasets could not be added", "\n".join(failures[:20]))
         if not added:
             QtWidgets.QMessageBox.information(
                 self, "No datasets added", "All selected brain datasets are already open."
@@ -4153,11 +4108,15 @@ class ViewerWindow(QtWidgets.QMainWindow):
         camera = [list(map(float, vector)) for vector in self.plotter.camera_position]
         return {
             "format": "fmost-brain-viewer-session",
-            "format_version": 1,
+            "format_version": 2,
             "app_version": __version__,
-            "atlas_signature": ATLAS_SIGNATURE,
+            "atlas_signature": self.atlas_signature,
             "datasets": datasets,
             "brain_style": self.current_brain_style,
+            "slice_index": self.slice_slider.value(),
+            "show_slice": self.slice_check.isChecked(),
+            "show_brain": bool(self.surface_actor.GetVisibility()) or (self.volume_actor is not None and bool(self.volume_actor.GetVisibility())),
+            "strict_soma_labels": self.strict_soma_labels,
             "brain_opacity": self.template_opacity.value(),
             "show_grid": self.grid_check.isChecked(),
             "show_region_legend": self.legend_check.isChecked(),
@@ -4191,61 +4150,62 @@ class ViewerWindow(QtWidgets.QMainWindow):
             path = Path(selected)
             if not str(path).lower().endswith(".fmost-session.json"):
                 path = Path(str(path) + ".fmost-session.json")
-        temporary = path.with_suffix(path.suffix + ".part")
         try:
-            temporary.write_text(
-                json.dumps(self._session_payload(path), indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            temporary.replace(path)
-        except OSError as exc:
+            payload = self._session_payload(path)
+            validate_session(payload)
+            atomic_json(path, payload)
+        except (OSError, ValueError, TypeError) as exc:
             QtWidgets.QMessageBox.critical(self, "Cannot save session", str(exc))
             return False
-        finally:
-            if temporary.exists():
-                try:
-                    temporary.unlink()
-                except OSError:
-                    LOGGER.warning("Could not remove incomplete session file: %s", temporary)
         self.session_path = path
+        self._saved_state = self._state_token()
         self.status.setText(f"Session saved: {path}")
         return True
 
+    def _state_token(self) -> str:
+        return json.dumps(self._session_payload(Path.home() / "state.json"), sort_keys=True)
+
+    def _has_unsaved_changes(self) -> bool:
+        return self._state_token() != self._saved_state
+
+    def _write_recovery(self) -> None:
+        if not self._has_unsaved_changes():
+            return
+        try:
+            self.recovery_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_json(self.recovery_path, self._session_payload(self.recovery_path))
+        except (OSError, ValueError):
+            LOGGER.warning("Could not write session recovery", exc_info=True)
+
     def _confirm_session_close(self) -> bool:
-        if self.session_path is None:
+        if not self._has_unsaved_changes():
             return True
-        while not self._save_session():
-            message = QtWidgets.QMessageBox(self)
-            message.setIcon(QtWidgets.QMessageBox.Icon.Warning)
-            message.setWindowTitle("Session was not saved")
-            message.setText("The current session could not be saved.")
-            message.setInformativeText(
-                "Retry saving, discard the unsaved session changes, or cancel closing."
+        while True:
+            choice = QtWidgets.QMessageBox.warning(
+                self, "Unsaved session", "Save your session changes before continuing?",
+                QtWidgets.QMessageBox.StandardButton.Save | QtWidgets.QMessageBox.StandardButton.Discard | QtWidgets.QMessageBox.StandardButton.Cancel,
+                QtWidgets.QMessageBox.StandardButton.Save,
             )
-            retry = message.addButton(
-                "Retry", QtWidgets.QMessageBox.ButtonRole.AcceptRole
-            )
-            discard = message.addButton(
-                "Discard", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
-            )
-            message.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
-            message.exec()
-            if message.clickedButton() is retry:
-                continue
-            return message.clickedButton() is discard
-        return True
+            if choice == QtWidgets.QMessageBox.StandardButton.Discard:
+                return True
+            if choice != QtWidgets.QMessageBox.StandardButton.Save:
+                return False
+            if self._save_session():
+                return True
 
     def _replace_with_projects(
-        self, projects: list[tuple[str, Path]], session_path=None, session_config=None
-    ) -> None:
-        if not self._confirm_session_close():
-            return
+        self, projects: list[tuple[str, Path]], session_path=None, session_config=None,
+        *, close_confirmed=False,
+    ) -> bool:
+        if not close_confirmed and not self._confirm_session_close():
+            return False
         self._replacement_window = ViewerWindow(
             projects, session_path=session_path, session_config=session_config
         )
         self._replacement_window.show()
         self._skip_session_save_once = True
         self.close()
+        return True
 
     def _new_session(self) -> None:
         folder = choose_brain_data_folder(self)
@@ -4262,21 +4222,23 @@ class ViewerWindow(QtWidgets.QMainWindow):
         )
         if not selected:
             return
+        if not self._confirm_session_close():
+            return
         atlas_snapshot = _snapshot_active_atlas()
-        loaded = load_session_file(Path(selected), self)
-        if loaded is not None:
-            projects, config = loaded
-            try:
-                self._replace_with_projects(projects, Path(selected), config)
-            except Exception as exc:
+        succeeded = False
+        self.setEnabled(False)
+        try:
+            loaded = load_session_file(Path(selected), self)
+            if loaded is not None:
+                projects, config = loaded
+                succeeded = self._replace_with_projects(projects, Path(selected), config, close_confirmed=True)
+        except Exception as exc:
+            LOGGER.exception("Could not construct replacement session")
+            QtWidgets.QMessageBox.critical(self, "Cannot open session", str(exc))
+        finally:
+            if not succeeded:
                 _restore_active_atlas(atlas_snapshot)
-                LOGGER.exception("Could not construct the replacement session window")
-                QtWidgets.QMessageBox.critical(
-                    self,
-                    "Cannot open session",
-                    "The new session window could not be created. The previous atlas "
-                    f"and viewer remain active.\n\n{exc}",
-                )
+                self.setEnabled(True)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if getattr(self, "_skip_session_save_once", False):
@@ -4285,9 +4247,22 @@ class ViewerWindow(QtWidgets.QMainWindow):
             event.ignore()
             return
         if self.update_check_thread is not None and self.update_check_thread.isRunning():
+            self._skip_session_save_once = True
+            self.setEnabled(False)
+            self.update_check_thread.finished.connect(self.close)
+            self.update_check_thread.requestInterruption()
             self.update_check_thread.quit()
-            self.update_check_thread.wait(16000)
+            event.ignore()
+            return
+        if hasattr(self, "recovery_timer"):
+            self.recovery_timer.stop()
+            try:
+                self.recovery_path.unlink(missing_ok=True)
+            except OSError:
+                LOGGER.warning("Could not remove recovery copy", exc_info=True)
         self.plotter.close()
+        if hasattr(self, "annotation"):
+            self.annotation.close()
         event.accept()
 
 
@@ -4425,37 +4400,9 @@ def load_session_file(
     path: Path, parent=None
 ) -> tuple[list[tuple[str, Path]], dict] | None:
     try:
-        config = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        config = read_session(path)
+    except (OSError, ValueError, UnicodeError, RecursionError) as exc:
         QtWidgets.QMessageBox.critical(parent, "Cannot open session", str(exc))
-        return None
-    if not isinstance(config, dict):
-        QtWidgets.QMessageBox.critical(
-            parent, "Cannot open session", "The session root must be a JSON object."
-        )
-        return None
-    if config.get("format") != "fmost-brain-viewer-session":
-        QtWidgets.QMessageBox.critical(
-            parent, "Cannot open session", "This is not an fMOST Brain Viewer session file."
-        )
-        return None
-    if config.get("format_version") != 1:
-        QtWidgets.QMessageBox.critical(
-            parent, "Cannot open session", "Unsupported fMOST session format version."
-        )
-        return None
-    entries = config.get("datasets")
-    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
-        QtWidgets.QMessageBox.critical(
-            parent, "Cannot open session", "The session dataset list is invalid."
-        )
-        return None
-    if not isinstance(config.get("manual_colors", {}), dict) or not isinstance(
-        config.get("visible_neurons", []), list
-    ):
-        QtWidgets.QMessageBox.critical(
-            parent, "Cannot open session", "The session selection data is invalid."
-        )
         return None
     atlas_snapshot = _snapshot_active_atlas()
     if not _confirm_session_atlas(config, parent):

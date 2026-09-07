@@ -5,11 +5,31 @@ from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 import re
 import sys
+import runpy
 
 from PyInstaller.utils.hooks import collect_all
 
 
 ROOT = Path(SPECPATH).parent
+version = runpy.run_path(str(ROOT / "version.py"))["__version__"]
+version_info = None
+if sys.platform == "win32":
+    from PyInstaller.utils.win32.versioninfo import (
+        VSVersionInfo, FixedFileInfo, StringFileInfo, StringTable,
+        StringStruct, VarFileInfo, VarStruct,
+    )
+    version_numbers = tuple(map(int, version.split("."))) + (0,)
+    version_info = VSVersionInfo(
+        ffi=FixedFileInfo(filevers=version_numbers, prodvers=version_numbers,
+            mask=0x3F, flags=0, OS=0x40004, fileType=1, subtype=0, date=(0, 0)),
+        kids=[StringFileInfo([StringTable("040904B0", [
+            StringStruct("FileDescription", "fMOST Brain Viewer"),
+            StringStruct("FileVersion", version),
+            StringStruct("ProductName", "fMOST Brain Viewer"),
+            StringStruct("ProductVersion", version),
+            StringStruct("OriginalFilename", "fMOST Brain Viewer.exe"),
+        ])]), VarFileInfo([VarStruct("Translation", [1033, 1200])])],
+    )
 
 datas = []
 binaries = []
@@ -156,6 +176,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(ROOT / "assets" / "fmost_brain_viewer.ico"),
+    version=version_info,
 )
 
 collection = COLLECT(
