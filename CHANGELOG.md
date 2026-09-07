@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.0.0 — 2026-09-07
+
+- Preserve non-application files during installation and upgrades; stop forcing applications closed.
+- Prevent selected axons disappearing after actor-cache eviction or dataset removal.
+- Save before switching atlas sessions or starting an update, and keep each viewer bound to its atlas.
+- Protect new unsaved sessions, write recovery copies every 30 seconds, and restore slice and volume settings.
+- Read version 1 sessions and write version 2 sessions with validated display settings.
+- Reject truncated SWC rows, missing parents, cycles, and unsafe numeric values; recover from per-file import errors.
+- Bound gzip decompression and store all generated atlas caches outside source folders.
+- Add background cancellable installer downloads and normal-user installer launch with explicit elevation fallback.
+- Add strict soma classification, provenance CSV export, cache management, and corrupt-cache rebuilding.
+- Separate data, session, cache and update helpers; expand renderer, session, input and installer regression coverage.
+
 ## 2.3.8 — 2026-09-06
 
 - Keep rapid clicks and double-clicks on neuron checkboxes limited to visibility changes.

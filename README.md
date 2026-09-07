@@ -1,5 +1,7 @@
 # fMOST Brain Viewer
 
+[Version 3.0 migration and safety changes](docs/RELEASE_3.0.md)
+
 [中文说明](README_zh-CN.md) · [User guide](docs/USER_GUIDE.md) · [Report a bug](https://github.com/orionhu99/fMOST-Brain-Viewer/issues)
 
 fMOST Brain Viewer is a Windows desktop application for viewing registered SWC
@@ -15,7 +17,7 @@ rotating GIF export, and reusable sessions.
 
 Python, Git, and a command prompt are **not** required.
 
-1. Download `fMOST-Brain-Viewer-Setup-2.3.8-win64.exe` from the
+1. Download `fMOST-Brain-Viewer-Setup-3.0.0-win64.exe` from the
    [latest release](https://github.com/orionhu99/fMOST-Brain-Viewer/releases/latest).
 2. Double-click the installer and follow the short setup wizard.
 3. Start **fMOST Brain Viewer**. On first launch, download the Allen CCF atlas or
@@ -119,4 +121,4 @@ other dependencies retain their own terms; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Citation metadata are provided
 in [CITATION.cff](CITATION.cff).
 
-Current version: **2.3.8 — Reliable neuron visibility and color controls**.
+Current version: **3.0.0 — Safe sessions, imports and updates**.

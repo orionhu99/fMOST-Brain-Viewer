@@ -23,10 +23,11 @@ dependencies = [
 fmost-brain-viewer = "fmost_brain_viewer:main"
 
 [tool.setuptools]
-py-modules = ["fmost_brain_viewer", "version"]
+py-modules = ["fmost_brain_viewer", "version", "viewer_data", "viewer_session", "viewer_cache", "viewer_updater"]
 
 [tool.setuptools.dynamic]
 version = { attr = "version.__version__" }
 
 [tool.setuptools.data-files]
 assets = ["assets/*.png", "assets/*.ico"]
+resources = ["resources/*.json"]

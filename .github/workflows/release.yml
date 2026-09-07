@@ -2,12 +2,18 @@ name: Windows release
 
 on:
   push:
+    branches:
+      - main
+    paths:
+      - version.py
     tags:
       - "v*"
   workflow_dispatch:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build-release:
@@ -23,7 +29,7 @@ jobs:
           fetch-depth: 0
 
       - name: Require release tag to be contained in main
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' || github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
           git fetch origin main --no-tags
@@ -55,6 +61,17 @@ jobs:
           python -m unittest discover -s tests -v
           python fmost_brain_viewer.py --ci-smoke-test
 
+      - name: Audit locked runtime dependencies in an isolated environment
+        shell: pwsh
+        run: |
+          $audit = Join-Path $env:RUNNER_TEMP 'viewer-audit-env'
+          python -m venv $audit
+          $auditPython = Join-Path $audit 'Scripts/python.exe'
+          & $auditPython -m pip install pip-audit==2.10.1
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install audit tool.' }
+          & $auditPython -m pip_audit -r requirements.lock --no-deps --disable-pip
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency audit failed.' }
+
       - name: Install pinned Inno Setup 6.7.3
         shell: pwsh
         run: |
@@ -66,7 +83,7 @@ jobs:
           if ($actual -ne $expected) { throw "Inno Setup SHA256 mismatch: $actual" }
           $process = Start-Process -FilePath $installer -ArgumentList @(
             "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER"
-          ) -Wait -PassThru
+          ) -Wait -WindowStyle Hidden -PassThru
           if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed." }
 
       - name: Build portable and installer artifacts
@@ -78,9 +95,20 @@ jobs:
       - name: Test silent install, frozen app, and uninstall
         shell: pwsh
         run: |
-          $setup = Get-ChildItem .\release\fMOST-Brain-Viewer-Setup-*-win64.exe -File -ErrorAction Stop
-          if ($setup.Count -ne 1) { throw "Expected exactly one installer." }
-          .\build\test_installer.ps1 -Installer $setup.FullName -HeadlessSmoke
+          $version = python build/check_version.py
+          $compiler = Join-Path $env:LOCALAPPDATA 'Programs/Inno Setup 6/ISCC.exe'
+          & $compiler "/DMyAppVersion=$version" /DTestInstall installer/fmost_brain_viewer.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Test installer compilation failed.' }
+          $setup = Get-ChildItem ./artifacts/installer-test/*.exe
+          ./build/test_installer.ps1 -Installer $setup.FullName -HeadlessSmoke
+
+      - name: Sign release provenance
+        if: github.ref_type == 'tag' || github.ref == 'refs/heads/main'
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            release/*.exe
+            release/*.zip
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
@@ -93,21 +121,35 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub Release from tag
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' || github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
+          $version = python build/check_version.py
+          $tag = "v$version"
+          git fetch origin main --tags
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'Release commit must be contained in main.' }
+          git rev-parse --verify "refs/tags/$tag" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            git tag $tag HEAD
+            git push origin "refs/tags/$tag"
+            if ($LASTEXITCODE -ne 0) { throw 'Could not publish version tag.' }
+          } else {
+            $tagCommit = git rev-list -n 1 $tag
+            $currentCommit = git rev-parse HEAD
+            if ($tagCommit -ne $currentCommit) { throw 'Version tag points to a different commit.' }
+          }
           $files = Get-ChildItem .\release -File | Select-Object -ExpandProperty FullName
           if (gh release view $tag 2>$null) {
-            gh release upload $tag $files --clobber
+            throw 'Release already exists; published artifacts are immutable.'
           } else {
             gh release create $tag $files --verify-tag --title "fMOST Brain Viewer $tag" --generate-notes
           }
 
       - name: Confirm published tag remains contained in main
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' || github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
           git fetch origin main --no-tags
