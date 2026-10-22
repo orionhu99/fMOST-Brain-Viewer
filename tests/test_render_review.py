@@ -9,6 +9,8 @@ import pyvista as pv
 from viewer_rendering import AxonActor
 
 
+@unittest.skipIf(os.environ.get('GITHUB_ACTIONS') == 'true',
+                 'GitHub Windows runners lack OpenGL; run GPU comparisons locally')
 class GpuSegmentReviewTests(unittest.TestCase):
     def _image(self, actor):
         plotter = pv.Plotter(off_screen=True, window_size=(160, 160))
