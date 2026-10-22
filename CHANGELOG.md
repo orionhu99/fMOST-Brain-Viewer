@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.2.0 — 2026-10-23
+
+- Check stable GitHub Releases in the background at most once per day while the viewer runs, with an opt-out in Settings and a non-blocking update notice supporting Later and Skip this version.
+- Download and SHA-256-verify updates with retry, resumable partial files, and reuse of verified installer downloads.
+- Save an update recovery snapshot before installation, update in place, and restart into the previous scene with its original session save path. Preserve atlas resources, caches, settings, and experimental inputs.
+- Include the 3.1.x GPU axon rendering, compact SWC parser, optional geometry budget, read-only partial loading with diagnostics, and session/export fixes described below.
+- Make Windows CI and release steps stop immediately when tests, version checks, privacy scans, or native build commands fail; prevent a later successful command from masking an earlier failure.
+
 ## 3.1.3 — 2026-10-23 (local update)
 
 - Load surviving valid axon nodes and connections from damaged SWCs without writing to source files or inventing missing geometry. Keep strict parsing for soma data and analysis.

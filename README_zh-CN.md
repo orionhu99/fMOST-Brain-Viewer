@@ -1,6 +1,6 @@
 # fMOST Brain Viewer
 
-[3.0 升级、安全修复与新功能说明](docs/RELEASE_3.0_zh-CN.md)
+[3.2 更新与升级说明](docs/RELEASE_3.2_zh-CN.md)
 
 [English](README.md) · [中文用户指南](docs/USER_GUIDE_zh-CN.md) · [报告问题](https://github.com/orionhu99/fMOST-Brain-Viewer/issues)
 
@@ -16,12 +16,12 @@ Framework（CCFv3）脑图谱。软件支持多数据集联合显示、冠状面
 普通用户不需要安装 Python、Git，也不需要使用命令行。
 
 1. 从 [最新 Release](https://github.com/orionhu99/fMOST-Brain-Viewer/releases/latest)
-   下载 `fMOST-Brain-Viewer-Setup-3.0.0-win64.exe`。
+   下载 `fMOST-Brain-Viewer-Setup-3.2.0-win64.exe`。
 2. 双击安装程序，按照简短的向导完成安装。
 3. 启动 **fMOST Brain Viewer**；首次启动时下载 Allen CCF 图谱，或者选择已有图谱目录。
 4. 选择已经配准的数据集文件夹并开始查看。
 
-首个正式版本未进行商业代码签名，Windows 可能显示 Microsoft SmartScreen 警告。
+未签名的安装包可能触发 Windows Microsoft SmartScreen 警告。
 继续安装前，请用 Release 中的 `SHA256SUMS.txt` 核对安装包 SHA-256。Release 页面
 同时提供内容相同的 portable ZIP。
 
@@ -72,17 +72,31 @@ axon–soma 绑定。缺少匹配或文件名有歧义的 axon 会标记为 `Unm
 - 按单个神经元或 soma 脑区选择 axon。
 - 输入 acronym、全名或 Allen structure ID 时实时显示候选脑区；可用键盘或鼠标添加。
 - axon 只渲染真实 SWC 线段，不额外显示固定大小的中间节点。
-- 放大 axon 时使用连续平滑圆管，同时保留纤细的 0x 中心线模式。
+- 放大 axon 时使用 GPU 实例化线段，加快粗细调整，同时保留纤细的 0x 中心线模式。
 - soma 可全部显示，也可与当前可见 axon 严格绑定。
 - 保存和恢复多数据集 `.fmost-session.json` session。
 - 导出 TIFF、PNG、JPEG、BMP 截图以及循环旋转 GIF。
 - 限制隐藏 axon actor 缓存，降低长时间浏览时的内存增长。
-- 从 Help 菜单后台检查 GitHub 正式版本，并选择、校验和启动更新安装器。
+- 原文件保持只读，加载损坏 axon SWC 的剩余有效部分，并提供缺失连接、跳过记录的诊断。
+- 软件运行时每天自动检查 GitHub 正式版本，按用户选择下载、校验、安装并恢复当前会话。
+
+## 更新已有安装
+
+3.2 增加不打断操作的新版提醒，可选 **Update now**（立即更新）、**Later**（稍后）或
+**Skip this version**（跳过本版）。可在 **Settings > Software updates...** 关闭自动检查；仍可随时使用
+**Help > Check for updates...**。下载支持重试、断点续传及复用已校验安装包。安装前会
+另存更新恢复快照，成功后自动重启，恢复当前场景和原来的 session 保存路径。
+图谱、缓存、设置和原始数据保留，正常更新无需重新下载图谱。
+
+旧版用户先安装一次本版，以后的新版本就可以收到自动提醒。检查仅在软件运行时进行，
+不会安装 Windows 后台服务，关闭软件期间也不会推送通知。详情见
+[用户指南](docs/USER_GUIDE_zh-CN.md#7-更新)。
 
 ## 隐私与数据处理
 
-软件不包含遥测，不会上传用户数据。只有用户主动下载 Allen 图谱或 ontology，或者
-选择 **Help > Check for updates** 时，软件才会访问网络。SWC、CSV 和 NRRD 输入始终只读；派生缓存、设置、日志、截图和
+软件不包含遥测，不会上传用户数据。开启自动更新检查时，运行中的软件会定期向 GitHub
+查询公开版本信息，不发送数据集或 session 内容。其他网络访问用于用户请求的图谱、
+ontology 下载，以及手动检查更新或下载安装包。SWC、CSV 和 NRRD 输入始终只读；派生缓存、设置、日志、截图和
 session 分开保存。分享 session、日志或截图前，请自行检查其中是否含有本机路径或
 数据集标识。
 
@@ -107,6 +121,5 @@ Li Bo Lab, Westlake University。Allen 数据、Qt/PySide 和其他依赖保留�
 详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；引用信息见
 [CITATION.cff](CITATION.cff)。
 
-当前版本：**3.1.3 — 本地渲染优化验证版**。
-
-本版尚未发布到 GitHub；上方正式下载说明仍对应 3.0.0。性能验证、使用限制见 [渲染优化说明](docs/RENDERING_3.1.md)。
+当前版本：**3.2.0**。详见[更新说明](docs/RELEASE_3.2_zh-CN.md)和
+[渲染验证及限制](docs/RENDERING_3.1.md)。

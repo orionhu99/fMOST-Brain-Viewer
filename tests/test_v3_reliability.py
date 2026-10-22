@@ -200,9 +200,13 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIsInstance(worker.error, updater.AtlasSetupCancelled)
         self.assertIsNone(worker.result)
 
-    def test_update_cancel_prevents_installer_launch(self):
+    def test_update_recovery_save_failure_prevents_installer_launch(self):
         window = SimpleNamespace(update_check_thread=None, update_check_progress=None,
-            _confirm_session_close=mock.Mock(return_value=False), close=mock.Mock())
+            _automatic_update_check=False, _update_in_progress=False,
+            session_path=None, atlas_template=Path("atlas/template.nrrd"),
+            _session_payload=mock.Mock(return_value={}), _has_unsaved_changes=lambda: True,
+            close=mock.Mock())
+        window._install_update = MethodType(v.ViewerWindow._install_update, window)
         release = {"tag_name": "v9.0.0", "assets": [{"name": "fMOST-Brain-Viewer-Setup-9.0.0-win64.exe"}]}
         dialog = mock.Mock()
         dialog.exec.return_value = v.QtWidgets.QDialog.DialogCode.Accepted
@@ -210,11 +214,18 @@ class ReliabilityTests(unittest.TestCase):
         download = mock.Mock()
         download.exec.return_value = v.QtWidgets.QDialog.DialogCode.Accepted
         download.worker.result = Path("test.exe")
-        with mock.patch.object(v, "UpdateDialog", return_value=dialog), \
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(v, "UPDATE_ROOT", Path(directory)), \
+             mock.patch.object(v.sys, "frozen", True, create=True), \
+             mock.patch.object(v.sys, "platform", "win32"), \
+             mock.patch.object(v, "UpdateDialog", return_value=dialog), \
              mock.patch.object(v, "DownloadDialog", return_value=download), \
+             mock.patch.object(v, "write_update_resume", side_effect=OSError("synthetic disk full")) as save, \
+             mock.patch.object(v.QtWidgets.QMessageBox, "critical") as critical, \
              mock.patch.object(v, "launch_update_installer", return_value=True) as launch:
             v.ViewerWindow._update_check_completed(window, [release], None)
-        window._confirm_session_close.assert_called_once()
+        save.assert_called_once()
+        critical.assert_called_once()
         launch.assert_not_called()
         window.close.assert_not_called()
 

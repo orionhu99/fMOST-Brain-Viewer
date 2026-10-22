@@ -33,6 +33,7 @@ jobs:
         shell: pwsh
         run: |
           git fetch origin main --no-tags
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch origin/main.' }
           git merge-base --is-ancestor HEAD origin/main
           if ($LASTEXITCODE -ne 0) {
             throw "Release tag $env:GITHUB_REF_NAME is not contained in origin/main."
@@ -48,24 +49,33 @@ jobs:
             requirements-build.lock
 
       - name: Verify version and tag
-        run: python build/check_version.py
+        run: |
+          python build/check_version.py
+          if ($LASTEXITCODE -ne 0) { throw 'Release version validation failed.' }
 
       - name: Scan tracked source for private material
-        run: python scripts/privacy_scan.py --repo-root .
+        run: |
+          python scripts/privacy_scan.py --repo-root .
+          if ($LASTEXITCODE -ne 0) { throw 'Source privacy scan failed.' }
 
       - name: Install hash-locked release toolchain
-        run: python -m pip install --require-hashes -r requirements-build.lock
+        run: |
+          python -m pip install --require-hashes -r requirements-build.lock
+          if ($LASTEXITCODE -ne 0) { throw 'Release toolchain installation failed.' }
 
       - name: Run unit and headless GUI smoke tests
         run: |
           python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed.' }
           python fmost_brain_viewer.py --ci-smoke-test
+          if ($LASTEXITCODE -ne 0) { throw 'GUI smoke test failed.' }
 
       - name: Audit locked runtime dependencies in an isolated environment
         shell: pwsh
         run: |
           $audit = Join-Path $env:RUNNER_TEMP 'viewer-audit-env'
           python -m venv $audit
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create isolated audit environment.' }
           $auditPython = Join-Path $audit 'Scripts/python.exe'
           & $auditPython -m pip install pip-audit==2.10.1
           if ($LASTEXITCODE -ne 0) { throw 'Could not install audit tool.' }
@@ -91,16 +101,19 @@ jobs:
         run: |
           $python = (Get-Command python).Source
           .\build\build_release.ps1 -Python $python -SkipTests -HeadlessSmoke
+          if ($LASTEXITCODE -ne 0) { throw 'Release artifact build failed.' }
 
       - name: Test silent install, frozen app, and uninstall
         shell: pwsh
         run: |
           $version = python build/check_version.py
+          if ($LASTEXITCODE -ne 0) { throw 'Release version validation failed.' }
           $compiler = Join-Path $env:LOCALAPPDATA 'Programs/Inno Setup 6/ISCC.exe'
           & $compiler "/DMyAppVersion=$version" /DTestInstall installer/fmost_brain_viewer.iss
           if ($LASTEXITCODE -ne 0) { throw 'Test installer compilation failed.' }
           $setup = Get-ChildItem ./artifacts/installer-test/*.exe
           ./build/test_installer.ps1 -Installer $setup.FullName -HeadlessSmoke
+          if ($LASTEXITCODE -ne 0) { throw 'Installer smoke test failed.' }
 
       - name: Sign release provenance
         if: github.ref_type == 'tag' || github.ref == 'refs/heads/main'
@@ -127,18 +140,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $version = python build/check_version.py
+          if ($LASTEXITCODE -ne 0) { throw 'Release version validation failed.' }
           $tag = "v$version"
           git fetch origin main --tags
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch release refs.' }
           git merge-base --is-ancestor HEAD origin/main
           if ($LASTEXITCODE -ne 0) { throw 'Release commit must be contained in main.' }
           git rev-parse --verify "refs/tags/$tag" 2>$null
           if ($LASTEXITCODE -ne 0) {
             git tag $tag HEAD
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create version tag.' }
             git push origin "refs/tags/$tag"
             if ($LASTEXITCODE -ne 0) { throw 'Could not publish version tag.' }
           } else {
             $tagCommit = git rev-list -n 1 $tag
+            if ($LASTEXITCODE -ne 0) { throw 'Could not resolve version tag.' }
             $currentCommit = git rev-parse HEAD
+            if ($LASTEXITCODE -ne 0) { throw 'Could not resolve release commit.' }
             if ($tagCommit -ne $currentCommit) { throw 'Version tag points to a different commit.' }
           }
           $files = Get-ChildItem .\release -File | Select-Object -ExpandProperty FullName
@@ -146,6 +164,7 @@ jobs:
             throw 'Release already exists; published artifacts are immutable.'
           } else {
             gh release create $tag $files --verify-tag --title "fMOST Brain Viewer $tag" --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw 'Could not publish GitHub Release.' }
           }
 
       - name: Confirm published tag remains contained in main
@@ -153,6 +172,7 @@ jobs:
         shell: pwsh
         run: |
           git fetch origin main --no-tags
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch origin/main after publication.' }
           git merge-base --is-ancestor HEAD origin/main
           if ($LASTEXITCODE -ne 0) {
             throw "Published tag $env:GITHUB_REF_NAME is not contained in origin/main."

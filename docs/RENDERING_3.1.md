@@ -1,6 +1,7 @@
 # 3.1 rendering validation / 渲染优化说明
 
-2026-10-23 local validation build; not a published GitHub release.
+Rendering changes developed in 3.1.x and included in the 3.2.0 release.
+The benchmark below records the 2026-10-23 validation run.
 
 ## Rendering changes
 

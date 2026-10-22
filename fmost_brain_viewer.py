@@ -34,6 +34,9 @@ from viewer_data import read_swc_with_ids, read_swc, read_swc_partial
 from viewer_session import read_session, read_legacy_session, validate_session, atomic_json
 from viewer_cache import read_surface_cache, save_surface_cache
 from viewer_rendering import AxonActor
+from viewer_update_state import (
+    CHECK_INTERVAL_SECONDS, automatic_check_due, read_update_resume, write_update_resume,
+)
 from viewer_updater import (
     AtlasSetupCancelled, version_tuple, newer_stable_releases,
     release_installer_asset, fetch_github_releases, download_release_asset,
@@ -100,6 +103,7 @@ CACHE_BASE = LOCAL_APP_DATA / "fMOST Brain Viewer" / "cache" / "atlas"
 CACHE_ROOT = CACHE_BASE
 LOG_DIR = LOCAL_APP_DATA / "fMOST Brain Viewer" / "logs"
 LOG_PATH = LOG_DIR / "fmost-brain-viewer.log"
+UPDATE_ROOT = LOCAL_APP_DATA / "fMOST Brain Viewer" / "updates"
 LOGGER = logging.getLogger("fmost_brain_viewer")
 GITHUB_RELEASES_API = (
     "https://api.github.com/repos/orionhu99/fMOST-Brain-Viewer/releases"
@@ -2197,7 +2201,7 @@ class UpdateDialog(QtWidgets.QDialog):
             "View release page", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole
         )
         self.install_button = buttons.addButton(
-            "Download and install", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
+            "Download and restart", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
         )
         buttons.rejected.connect(self.reject)
         self.install_button.clicked.connect(self.accept)
@@ -2220,6 +2224,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.update_check_thread: QtCore.QThread | None = None
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_check_progress: QtWidgets.QProgressDialog | None = None
+        self._automatic_update_check = False
+        self._update_in_progress = False
+        self.update_banner = None
         self.startup_progress = progress
         self.session_path = session_path
         self.strict_soma_labels = bool((session_config or {}).get("strict_soma_labels", False))
@@ -2321,6 +2328,11 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.recovery_timer.setInterval(30000)
         self.recovery_timer.timeout.connect(self._write_recovery)
         self.recovery_timer.start()
+        self.update_timer = QtCore.QTimer(self)
+        self.update_timer.setInterval(60 * 60 * 1000)
+        self.update_timer.timeout.connect(self._maybe_check_for_updates)
+        self.update_timer.start()
+        QtCore.QTimer.singleShot(5000, self, self._maybe_check_for_updates)
         self._report_progress(
             100,
             f"Ready: {len(self.datasets)} brains; {len(self.neuron_items)} neurons; "
@@ -2443,6 +2455,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.strict_labels_action.triggered.connect(self._set_strict_soma_labels)
         settings_menu.addAction("Manage atlas cache...", self._manage_cache)
         settings_menu.addAction("Axon memory settings...", self._show_axon_settings)
+        settings_menu.addAction("Software updates...", self._show_update_settings)
         self.mouse_wheel_action = settings_menu.addAction(
             "Enable mouse-wheel parameter adjustment"
         )
@@ -2835,17 +2848,75 @@ class ViewerWindow(QtWidgets.QMainWindow):
         dialog.setTextFormat(QtCore.Qt.TextFormat.RichText)
         dialog.exec()
 
-    def _check_for_updates(self) -> None:
-        if self.update_check_thread is not None:
-            self.update_check_progress.show()
-            return
-        self.update_check_progress = QtWidgets.QProgressDialog(
-            "Checking GitHub for updates...", "", 0, 0, self
+    def _show_update_settings(self) -> None:
+        settings = QtCore.QSettings("LiBoLab", "fMOSTBrainViewer")
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Software updates")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        enabled = QtWidgets.QCheckBox("Automatic update checks (once a day)")
+        enabled.setChecked(settings.value("updates/automatic_check", True, type=bool))
+        layout.addWidget(enabled)
+        note = QtWidgets.QLabel(
+            "Checks run in the background while the viewer is open. Updates are installed "
+            "only when you choose Update now. Your current scene is saved for restoration; "
+            "atlas files, caches, settings and original data are retained."
         )
-        self.update_check_progress.setCancelButton(None)
-        self.update_check_progress.setWindowModality(QtCore.Qt.WindowModality.NonModal)
-        self.update_check_progress.setMinimumDuration(0)
-        self.update_check_progress.show()
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        reset = QtWidgets.QPushButton("Reset skipped version and reminders")
+        reset.clicked.connect(lambda: self._reset_update_reminders(settings))
+        layout.addWidget(reset)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.resize(490, 180)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            settings.setValue("updates/automatic_check", enabled.isChecked())
+            settings.sync()
+            if not enabled.isChecked():
+                self._hide_update_banner()
+            else:
+                self._maybe_check_for_updates()
+
+    @staticmethod
+    def _reset_update_reminders(settings) -> None:
+        for key in ("updates/skipped_version", "updates/remind_after", "updates/last_check"):
+            settings.remove(key)
+        settings.sync()
+
+    def _maybe_check_for_updates(self) -> None:
+        if (getattr(self, "_scene_closed", False) or not self.isVisible()
+                or self._update_in_progress or self.update_check_thread is not None
+                or QtWidgets.QApplication.activeModalWidget() is not None):
+            return
+        settings = QtCore.QSettings("LiBoLab", "fMOSTBrainViewer")
+        if automatic_check_due(settings):
+            self._check_for_updates(automatic=True)
+
+    def _check_for_updates(self, _checked=False, *, automatic: bool = False) -> None:
+        if self._update_in_progress:
+            return
+        if self.update_check_thread is not None:
+            if not automatic:
+                self._automatic_update_check = False
+                if self.update_check_progress is not None:
+                    self.update_check_progress.show()
+            return
+        self._automatic_update_check = automatic
+        settings = QtCore.QSettings("LiBoLab", "fMOSTBrainViewer")
+        settings.setValue("updates/last_check", time.time())
+        settings.sync()
+        if not automatic:
+            self.update_check_progress = QtWidgets.QProgressDialog(
+                "Checking GitHub for updates...", "", 0, 0, self
+            )
+            self.update_check_progress.setCancelButton(None)
+            self.update_check_progress.setWindowModality(QtCore.Qt.WindowModality.NonModal)
+            self.update_check_progress.setMinimumDuration(0)
+            self.update_check_progress.show()
         self.update_check_thread = QtCore.QThread(self)
         self.update_check_worker = UpdateCheckWorker()
         self.update_check_worker.moveToThread(self.update_check_thread)
@@ -2867,12 +2938,23 @@ class ViewerWindow(QtWidgets.QMainWindow):
                 "Could not check for application updates",
                 exc_info=(type(error), error, error.__traceback__),
             )
+            if self._automatic_update_check:
+                return
             QtWidgets.QMessageBox.warning(
                 self,
                 "Update check failed",
                 f"{type(error).__name__}: {error}\n\nCheck your internet connection or use the "
                 "GitHub Releases page.",
             )
+            return
+        if self._automatic_update_check:
+            settings = QtCore.QSettings("LiBoLab", "fMOSTBrainViewer")
+            if not settings.value("updates/automatic_check", True, type=bool):
+                return
+            skipped = str(settings.value("updates/skipped_version", ""))
+            candidates = [r for r in releases if r.get("tag_name") != skipped and release_installer_asset(r)]
+            if candidates:
+                self._show_update_banner(candidates[0])
             return
         if not releases:
             QtWidgets.QMessageBox.information(
@@ -2887,7 +2969,52 @@ class ViewerWindow(QtWidgets.QMainWindow):
         )
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
-        release = dialog.selected_release()
+        self._install_update(dialog.selected_release())
+
+    def _hide_update_banner(self) -> None:
+        if self.update_banner is not None:
+            self.statusBar().removeWidget(self.update_banner)
+            self.update_banner.deleteLater()
+            self.update_banner = None
+
+    def _show_update_banner(self, release: dict) -> None:
+        self._hide_update_banner()
+        banner = QtWidgets.QWidget(self)
+        row = QtWidgets.QHBoxLayout(banner)
+        row.setContentsMargins(6, 2, 6, 2)
+        label = QtWidgets.QLabel(f"fMOST Brain Viewer {release['tag_name']} is available")
+        label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        row.addWidget(label)
+        for text, callback in (
+            ("Update now", lambda: self._install_update(release)),
+            ("Later", lambda: self._dismiss_update(release, skip=False)),
+            ("Skip this version", lambda: self._dismiss_update(release, skip=True)),
+        ):
+            button = QtWidgets.QPushButton(text)
+            button.clicked.connect(callback)
+            row.addWidget(button)
+        self.statusBar().addPermanentWidget(banner)
+        self.update_banner = banner
+
+    def _dismiss_update(self, release: dict, *, skip: bool) -> None:
+        settings = QtCore.QSettings("LiBoLab", "fMOSTBrainViewer")
+        if skip:
+            settings.setValue("updates/skipped_version", str(release["tag_name"]))
+        else:
+            settings.setValue("updates/remind_after", time.time() + CHECK_INTERVAL_SECONDS)
+        settings.sync()
+        self._hide_update_banner()
+
+    def _install_update(self, release: dict) -> None:
+        if self._update_in_progress or getattr(self, "_scene_closed", False):
+            return
+        if sys.platform != "win32" or not getattr(sys, "frozen", False):
+            QtWidgets.QMessageBox.information(
+                self, "Packaged application required",
+                "Use the packaged Windows application for in-place updates. "
+                "Source installations can download a package from the GitHub Releases page.",
+            )
+            return
         asset = release_installer_asset(release)
         if asset is None:
             QtWidgets.QMessageBox.warning(
@@ -2897,26 +3024,52 @@ class ViewerWindow(QtWidgets.QMainWindow):
                 "Open its release page to download manually.",
             )
             return
-        destination = (
-            LOCAL_APP_DATA / "fMOST Brain Viewer" / "updates" / str(asset["name"])
-        )
-        download = DownloadDialog(asset, destination, self)
-        if download.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            error = download.worker.error
-            if error is not None and not isinstance(error, AtlasSetupCancelled) and not download.worker.isInterruptionRequested():
-                QtWidgets.QMessageBox.critical(self, "Update download failed", str(error))
-            return
-        if not self._confirm_session_close():
-            return
-        installer = download.worker.result
-        if not launch_update_installer(installer):
-            answer = QtWidgets.QMessageBox.question(
-                self, "Administrator permission", "The installer could not start. Retry with administrator permission for a protected installation?"
-            )
-            if answer != QtWidgets.QMessageBox.StandardButton.Yes or not launch_update_installer(installer, elevate=True):
+        self._update_in_progress = True
+        try:
+            download = DownloadDialog(asset, UPDATE_ROOT / str(asset["name"]), self)
+            if download.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+                error = download.worker.error
+                if error is not None and not isinstance(error, AtlasSetupCancelled) and not download.worker.isInterruptionRequested():
+                    QtWidgets.QMessageBox.critical(self, "Update download failed", str(error))
                 return
-        self._skip_session_save_once = True
-        self.close()
+            resume = UPDATE_ROOT / f"resume-{uuid.uuid4().hex}.fmost-session.json"
+            settings = QtCore.QSettings("LiBoLab", "fMOSTBrainViewer")
+            try:
+                write_update_resume(
+                    resume, UPDATE_ROOT, self._session_payload(resume),
+                    original_session=self.session_path, atlas_directory=self.atlas_template.parent,
+                    target_version=str(release["tag_name"]).removeprefix("v"),
+                    was_dirty=self._has_unsaved_changes() or self.session_path is None,
+                )
+                settings.setValue("updates/pending_resume", str(resume))
+                settings.sync()
+                if settings.status() != QtCore.QSettings.Status.NoError:
+                    raise OSError("Could not record the update recovery location.")
+            except (OSError, ValueError, TypeError) as exc:
+                QtWidgets.QMessageBox.critical(self, "Cannot save update recovery", str(exc))
+                return
+            try:
+                launched = launch_update_installer(
+                    download.worker.result, install_directory=Path(sys.executable).resolve().parent,
+                    resume_path=resume, wait_pid=os.getpid(),
+                )
+            except (OSError, ValueError) as exc:
+                LOGGER.warning("Could not launch update installer", exc_info=True)
+                launched = False
+            if not launched:
+                settings.remove("updates/pending_resume")
+                settings.sync()
+                QtWidgets.QMessageBox.warning(
+                    self, "Update could not start",
+                    "Your scene is still open and a recovery copy was saved. "
+                    "Retry the update or run the downloaded installer manually.",
+                )
+                return
+            self._skip_session_save_once = True
+            self._update_in_progress = False
+            self.close()
+        finally:
+            self._update_in_progress = False
 
     @QtCore.Slot()
     def _update_check_finished(self) -> None:
@@ -4582,6 +4735,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if getattr(self, "_scene_closed", False):
             event.accept()
             return
+        if getattr(self, "_update_in_progress", False):
+            event.ignore()
+            return
         if getattr(self, "_skip_session_save_once", False):
             self._skip_session_save_once = False
         elif not self._confirm_session_close():
@@ -4595,7 +4751,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.update_check_thread.quit()
             event.ignore()
             return
-        for name in ("axon_width_timer", "coronal_repeat_timer"):
+        for name in ("axon_width_timer", "coronal_repeat_timer", "update_timer"):
             timer = getattr(self, name, None)
             if timer is not None:
                 timer.stop()
@@ -5055,6 +5211,40 @@ def run_self_test(render: bool = True) -> int:
         return 1
 
 
+def load_update_startup(path: Path):
+    """Restore the recorded atlas and scene without invoking download/setup dialogs."""
+    path, payload = read_update_resume(path, UPDATE_ROOT)
+    before = _snapshot_active_atlas()
+    try:
+        activate_atlas(Path(payload["update_resume"]["atlas_directory"]))
+        if payload.get("atlas_signature") != ATLAS_SIGNATURE:
+            raise ValueError("The update recovery atlas no longer matches its saved identity.")
+        loaded = load_session_file(path)
+        if loaded is None:
+            raise ValueError("The saved update scene could not be restored. Its recovery copy was kept.")
+        projects, config = loaded
+        original = payload["update_resume"]["original_session"]
+        return projects, config, Path(original) if original else None
+    except Exception:
+        _restore_active_atlas(before)
+        raise
+
+
+def complete_update_resume(window, path: Path) -> None:
+    """Acknowledge a handoff only after constructing the restored scene successfully."""
+    path, payload = read_update_resume(path, UPDATE_ROOT)
+    info = payload["update_resume"]
+    if info["was_dirty"] or not info["original_session"]:
+        window._saved_state = ""
+        window._write_recovery()
+    settings = QtCore.QSettings("LiBoLab", "fMOSTBrainViewer")
+    pending = str(settings.value("updates/pending_resume", ""))
+    if pending and Path(pending).resolve() == path:
+        settings.remove("updates/pending_resume")
+        settings.sync()
+    window.status.setText("Previous scene restored. Atlas, caches, settings and original data retained.")
+
+
 def main() -> int:
     configure_logging()
     sys.excepthook = _global_exception_hook
@@ -5062,6 +5252,14 @@ def main() -> int:
     ci_smoke_test = "--ci-smoke-test" in sys.argv
     test_arguments = {"--self-test", "--ci-smoke-test"}
     app_arguments = [argument for argument in sys.argv if argument not in test_arguments]
+    resume_argument = None
+    if "--resume-update" in app_arguments:
+        index = app_arguments.index("--resume-update")
+        if index + 1 >= len(app_arguments):
+            print("--resume-update requires a recovery file.", file=sys.stderr)
+            return 2
+        resume_argument = app_arguments[index + 1]
+        del app_arguments[index:index + 2]
     app = QtWidgets.QApplication(app_arguments)
     app.setApplicationName("fMOST Brain Viewer")
     app.setOrganizationName("LiBoLab")
@@ -5072,8 +5270,34 @@ def main() -> int:
         return 2
     if self_test or ci_smoke_test:
         return run_self_test(render=not ci_smoke_test)
+    settings = QtCore.QSettings("LiBoLab", "fMOSTBrainViewer")
+    resume_value = resume_argument or str(settings.value("updates/pending_resume", ""))
+    resumed_path = None
+    startup = None
+    if resume_value:
+        try:
+            candidate, snapshot = read_update_resume(Path(resume_value), UPDATE_ROOT)
+            target = version_tuple(snapshot["update_resume"]["target_version"])
+            restore = True
+            if target > version_tuple(__version__):
+                restore = QtWidgets.QMessageBox.question(
+                    None, "Update not completed",
+                    "The previous update did not finish. Restore your saved scene in this version?",
+                    QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                ) == QtWidgets.QMessageBox.StandardButton.Yes
+            if restore:
+                startup = load_update_startup(candidate)
+                resumed_path = candidate
+            else:
+                settings.remove("updates/pending_resume")
+                settings.sync()
+        except Exception as exc:
+            LOGGER.exception("Could not restore update scene")
+            QtWidgets.QMessageBox.warning(
+                None, "Update scene recovery", f"{exc}\n\nRecovery copy retained: {resume_value}"
+            )
     try:
-        if not ensure_atlas_configured():
+        if startup is None and not ensure_atlas_configured():
             return 0
     except Exception as exc:
         LOGGER.exception("Atlas setup failed")
@@ -5081,7 +5305,8 @@ def main() -> int:
             None, "Atlas setup failed", f"{exc}\n\nLog: {LOG_PATH}"
         )
         return 1
-    startup = choose_startup_data()
+    if startup is None:
+        startup = choose_startup_data()
     if startup is None:
         return 0
     progress = None
@@ -5097,6 +5322,8 @@ def main() -> int:
             session_path=session_path,
             session_config=session_config,
         )
+        if resumed_path is not None:
+            complete_update_resume(window, resumed_path)
     except Exception as exc:
         LOGGER.exception("Cannot open dataset")
         if progress is not None:

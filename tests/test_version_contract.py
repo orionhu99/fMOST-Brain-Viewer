@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class VersionContractTests(unittest.TestCase):
     def test_public_release_version(self) -> None:
-        self.assertEqual(__version__, "3.1.3")
+        self.assertEqual(__version__, "3.2.0")
 
     def test_package_uses_version_module_as_single_source(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -35,11 +35,14 @@ class VersionContractTests(unittest.TestCase):
 
     def test_public_metadata_agrees(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        readme_zh = (ROOT / "README_zh-CN.md").read_text(encoding="utf-8")
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         citation = (ROOT / "CITATION.cff").read_text(encoding="utf-8")
         self.assertIn(f"Current version: **{__version__}", readme)
+        self.assertIn(f"当前版本：**{__version__}", readme_zh)
         self.assertRegex(changelog, rf"(?m)^## {re.escape(__version__)}\s+—")
         self.assertRegex(citation, rf"(?m)^version: {re.escape(__version__)}$")
+        self.assertRegex(citation, rf"(?m)^  version: {re.escape(__version__)}$")
 
 
 if __name__ == "__main__":
