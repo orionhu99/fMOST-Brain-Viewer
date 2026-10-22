@@ -30,9 +30,10 @@ from pyvistaqt import QtInteractor
 from scipy import ndimage
 
 from version import __version__
-from viewer_data import read_swc_with_ids, read_swc
+from viewer_data import read_swc_with_ids, read_swc, read_swc_partial
 from viewer_session import read_session, read_legacy_session, validate_session, atomic_json
 from viewer_cache import read_surface_cache, save_surface_cache
+from viewer_rendering import AxonActor
 from viewer_updater import (
     AtlasSetupCancelled, version_tuple, newer_stable_releases,
     release_installer_asset, fetch_github_releases, download_release_asset,
@@ -56,6 +57,12 @@ AXON_TUBE_RADIUS_PER_SIZE_UM = 4.0
 AXON_TUBE_SIDES = 8
 MAX_HIDDEN_AXON_ACTORS = 64
 MAX_HIDDEN_AXON_POINTS = 2_000_000
+MAX_HIDDEN_AXON_BYTES = 64 * 1024**2
+DEFAULT_AXON_BUDGET_MB = 1024
+MAX_AXON_FILE_BYTES = 64 * 1024**2
+MAX_AXON_PARSE_BYTES = 512 * 1024**2
+# Allow headroom over the compact parser's numeric buffers and topology arrays.
+AXON_PARSE_BYTES_PER_NODE = 256
 ATLAS_TEMPLATE_NAME = "average_template_25.nrrd"
 ATLAS_ANNOTATION_NAME = "annotation_10.nrrd"
 NRRD_DTYPE_CODES = {
@@ -1218,12 +1225,18 @@ def region_rgba(region_id: int, ontology: dict[int, dict]) -> tuple[int, int, in
 
 
 def annotation_slice_rgba(
-    labels: np.ndarray, ontology: dict[int, dict]
+    labels: np.ndarray, ontology: dict[int, dict], *, annotation=None,
 ) -> np.ndarray:
     """Map a 2D categorical annotation slice to stable, non-interpolated RGBA."""
     region_ids, inverse = np.unique(labels, return_inverse=True)
+    display_ids = [
+        int(value) if annotation is None else (
+            0 if annotation.is_background(int(value)) else annotation.atlas_id(int(value))
+        )
+        for value in region_ids
+    ]
     palette = np.array(
-        [region_rgba(int(region_id), ontology) for region_id in region_ids],
+        [region_rgba(region_id, ontology) for region_id in display_ids],
         dtype=np.uint8,
     )
     return palette[inverse].reshape(*labels.shape, 4)
@@ -1234,6 +1247,7 @@ def annotation_slice_grid(
     spacing: tuple[float, float],
     position_um: float,
     ontology: dict[int, dict],
+    *, annotation=None,
 ) -> pv.ImageData:
     """Build a cell-colored coronal plane whose cell centers match annotation pixels."""
     if labels.ndim != 2:
@@ -1244,7 +1258,7 @@ def annotation_slice_grid(
         spacing=(spacing_x, spacing_y, 1),
         origin=(-spacing_x / 2, -spacing_y / 2, position_um),
     )
-    rgba = annotation_slice_rgba(labels, ontology)
+    rgba = annotation_slice_rgba(labels, ontology, annotation=annotation)
     plane.cell_data["region_rgba"] = rgba.transpose(1, 0, 2).reshape(-1, 4)
     return plane
 
@@ -1324,12 +1338,15 @@ def _surface_from_mask(mask: np.ndarray, spacing: tuple[float, float, float], or
 
 def load_or_create_whole_brain_surface(annotation: RawNrrdMemmap) -> pv.PolyData:
     getattr(annotation, "cache_root", CACHE_ROOT).mkdir(parents=True, exist_ok=True)
-    cache = getattr(annotation, "cache_root", CACHE_ROOT) / "whole_brain_surface_step4_v3.vtp"
+    cache = getattr(annotation, "cache_root", CACHE_ROOT) / "whole_brain_surface_step4_v4.vtp"
     cached = read_surface_cache(cache, annotation.path)
     if cached is not None:
         return cached
     step = 4
-    mask = annotation.world_labels(step) != 0
+    labels = annotation.world_labels(step)
+    mask = labels != 0
+    if annotation.is_background(65535):
+        mask &= labels != 65535
     mask = ndimage.binary_closing(mask, iterations=1)
     for z in range(mask.shape[2]):
         mask[:, :, z] = ndimage.binary_fill_holes(mask[:, :, z])
@@ -1601,12 +1618,60 @@ class RegionProgressController(QtCore.QObject):
     @QtCore.Slot()
     def succeeded(self) -> None:
         self.outcome["ok"] = True
-        self.progress_dialog.accept()
 
     @QtCore.Slot(str)
     def failed(self, message: str) -> None:
         self.outcome["error"] = message
-        self.progress_dialog.reject()
+
+
+class RegionCacheDialog(QtWidgets.QDialog):
+    """Keep the UI alive until an in-flight VTK operation has finished."""
+
+    def __init__(self, parent, worker, thread, outcome):
+        super().__init__(parent)
+        self.worker, self.thread, self.outcome = worker, thread, outcome
+        self.setMinimumWidth(440)
+        layout = QtWidgets.QVBoxLayout(self)
+        self.label = QtWidgets.QLabel("Starting...")
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setRange(0, 1)
+        self.cancel_button = QtWidgets.QPushButton("Cancel")
+        layout.addWidget(self.label)
+        layout.addWidget(self.bar)
+        layout.addWidget(self.cancel_button)
+        self.cancel_button.clicked.connect(self.reject)
+
+    def setMaximum(self, value):  # noqa: N802
+        self.bar.setMaximum(value)
+
+    def setValue(self, value):  # noqa: N802
+        self.bar.setValue(value)
+
+    def setLabelText(self, text):  # noqa: N802
+        if not self.worker.cancel_requested:
+            self.label.setText(text)
+
+    def reject(self):
+        if self.thread.isRunning():
+            self.worker.cancel_requested = True
+            self.label.setText("Cancelling... waiting for the current surface operation to finish.")
+            self.cancel_button.setEnabled(False)
+        else:
+            super().reject()
+
+    def closeEvent(self, event):  # noqa: N802
+        if self.thread.isRunning():
+            self.reject()
+            event.ignore()
+        else:
+            event.accept()
+
+    @QtCore.Slot()
+    def _worker_finished(self):
+        if self.worker.cancel_requested or not self.outcome["ok"]:
+            super().reject()
+        else:
+            self.accept()
 
 
 def run_region_cache_job(
@@ -1617,36 +1682,36 @@ def run_region_cache_job(
     region_id: int | None = None,
 ):
     title = "Prepare brain region library" if mode else "Prepare brain region"
-    progress = QtWidgets.QProgressDialog("Starting...", "Cancel", 0, 1, parent)
-    progress.setWindowTitle(title)
-    progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
-    progress.setMinimumDuration(0)
-    progress.setAutoClose(False)
     thread = QtCore.QThread(parent)
     worker = RegionCacheWorker(annotation, ontology, mode, region_id)
     worker.moveToThread(thread)
     outcome = {"ok": False, "error": ""}
+    progress = RegionCacheDialog(parent, worker, thread, outcome)
+    progress.setWindowTitle(title)
+    progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
     controller = RegionProgressController(progress, outcome)
     worker.progress.connect(controller.update)
     worker.succeeded.connect(controller.succeeded)
     worker.failed.connect(controller.failed)
     worker.succeeded.connect(thread.quit)
     worker.failed.connect(thread.quit)
-    progress.canceled.connect(lambda: setattr(worker, "cancel_requested", True))
+    thread.finished.connect(progress._worker_finished)
+    thread.finished.connect(worker.deleteLater)
     thread.started.connect(worker.run)
     thread.start()
     progress.exec()
-    if thread.isRunning():
-        thread.quit()
-    thread.wait()
+    # The dialog stays open while the worker finishes, including after Cancel.
+    # Do not block the GUI thread in QThread.wait() during a large VTK filter.
     result = worker.result
     error = worker.error
+    cancelled = worker.cancel_requested
+    progress.deleteLater()
     del controller
     del worker
     thread.deleteLater()
     if error is not None and not isinstance(error, AtlasSetupCancelled):
         raise error
-    return result if outcome["ok"] else None
+    return result if outcome["ok"] and not cancelled else None
 
 
 def region_library_is_current(annotation: RawNrrdMemmap, mode: str = "standard") -> bool:
@@ -2165,10 +2230,14 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.mouse_wheel_parameters_enabled = settings.value(
             "enable_parameter_mouse_wheel", False, type=bool
         )
+        self.axon_budget_enforced = settings.value("axon_memory_budget_enforced", False, type=bool)
+        self.saved_axon_budget = settings.value("axon_memory_budget_mib", DEFAULT_AXON_BUDGET_MB, type=int)
         self.datasets: dict[str, BrainDataset] = {}
         self.dataset_items: dict[str, QtWidgets.QListWidgetItem] = {}
         self.axon_sources: dict[str, Path] = {}
         self.axon_actors: dict[str, object] = {}
+        self.axon_load_reports: dict[str, object] = {}
+        self.axon_report_notified: dict[str, str] = {}
         self.axon_actor_last_used: dict[str, int] = {}
         self.axon_actor_use_counter = 0
         self.neuron_ids: dict[str, int | None] = {}
@@ -2345,6 +2414,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         file_menu.addAction("Open session...", self._open_session)
         file_menu.addAction("Recover unsaved session...", self._recover_session)
         file_menu.addAction("Export soma diagnostics...", self._export_soma_diagnostics)
+        file_menu.addAction("SWC load diagnostics...", self._show_swc_diagnostics)
         self.save_session_action = file_menu.addAction("Save session", self._save_session)
         file_menu.addAction(
             "Save session as...", lambda _checked=False: self._save_session(save_as=True)
@@ -2372,6 +2442,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.strict_labels_action.setChecked(self.strict_soma_labels)
         self.strict_labels_action.triggered.connect(self._set_strict_soma_labels)
         settings_menu.addAction("Manage atlas cache...", self._manage_cache)
+        settings_menu.addAction("Axon memory settings...", self._show_axon_settings)
         self.mouse_wheel_action = settings_menu.addAction(
             "Enable mouse-wheel parameter adjustment"
         )
@@ -2505,7 +2576,42 @@ class ViewerWindow(QtWidgets.QMainWindow):
         )
         appearance_layout.addRow("3D brain opacity", self.template_opacity)
         self.axon_width = self._spinbox(0.0, 10.0, 0.5, 0.0, 1)
+        self.axon_width.setKeyboardTracking(False)
         appearance_layout.addRow("Axon thickness (×)", self.axon_width)
+        self.axon_settings_dialog = QtWidgets.QDialog(self)
+        self.axon_settings_dialog.setWindowTitle("Axon memory settings")
+        self.axon_settings_dialog.setMinimumWidth(460)
+        memory_layout = QtWidgets.QVBoxLayout(self.axon_settings_dialog)
+        self.axon_budget_check = QtWidgets.QCheckBox("Enforce an axon memory budget")
+        self.axon_budget_check.setChecked(self.axon_budget_enforced)
+        self.axon_budget_check.setToolTip("Optional limit on estimated geometry use. Off by default.")
+        memory_layout.addWidget(self.axon_budget_check)
+        memory_form = QtWidgets.QFormLayout()
+        memory_layout.addLayout(memory_form)
+        self.axon_budget = QtWidgets.QSpinBox(self.axon_settings_dialog)
+        self.axon_budget.setRange(128, 8192)
+        self.axon_budget.setValue(self.saved_axon_budget)
+        self.axon_budget.setSuffix(" MiB")
+        self.axon_budget.setEnabled(self.axon_budget_enforced)
+        self.axon_budget_check.toggled.connect(self._set_axon_budget_policy)
+        self.axon_budget.valueChanged.connect(self._set_axon_budget_policy)
+        self.axon_budget.setToolTip("Estimated axon geometry and GPU instance allowance, not total RAM/VRAM. Lower this if your graphics card runs out of memory. Applies to new loads.")
+        memory_form.addRow("Axon memory budget", self.axon_budget)
+        self.axon_usage = QtWidgets.QLabel("0 loaded")
+        memory_form.addRow("Axon resources", self.axon_usage)
+        memory_note = QtWidgets.QLabel(
+            "The optional budget applies to newly loaded neurons. Resource usage is an "
+            "estimate, not a measurement of total RAM or GPU memory."
+        )
+        memory_note.setWordWrap(True)
+        memory_layout.addWidget(memory_note)
+        memory_buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        memory_buttons.rejected.connect(self.axon_settings_dialog.reject)
+        memory_layout.addWidget(memory_buttons)
+        self.axon_width_timer = QtCore.QTimer(self)
+        self.axon_width_timer.setSingleShot(True)
+        self.axon_width_timer.setInterval(200)
+        self.axon_width_timer.timeout.connect(self._apply_pending_axon_width)
         self.soma_size = self._spinbox(1.0, 50.0, 1.0, 10.0, 1)
         appearance_layout.addRow("Soma size", self.soma_size)
         layout.addWidget(appearance_group)
@@ -2580,6 +2686,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
         plot_layout = QtWidgets.QVBoxLayout(plot_frame)
         plot_layout.setContentsMargins(0, 0, 0, 0)
         self.plotter = QtInteractor(plot_frame)
+        # QtInteractor otherwise re-renders even a completely idle scene at 5 Hz.
+        if hasattr(self.plotter, 'render_timer'):
+            self.plotter.render_timer.stop()
         plot_layout.addWidget(self.plotter.interactor)
         controls_scroll = QtWidgets.QScrollArea()
         controls_scroll.setWidgetResizable(True)
@@ -3024,26 +3133,138 @@ class ViewerWindow(QtWidgets.QMainWindow):
             item.setCheckState(QtCore.Qt.CheckState.Unchecked)
             self.neuron_list.addItem(item)
             self.neuron_items[key] = item
+            self._update_axon_diagnostic_label(key)
+
+    def _record_axon_load_report(self, key: str, report) -> None:
+        if not hasattr(self, "axon_load_reports"):
+            self.axon_load_reports = {}
+        if report.has_warnings:
+            self.axon_load_reports[key] = report
+        else:
+            self.axon_load_reports.pop(key, None)
+            getattr(self, "axon_report_notified", {}).pop(key, None)
+        ViewerWindow._update_axon_diagnostic_label(self, key)
+
+    def _update_axon_diagnostic_label(self, key: str) -> None:
+        item = getattr(self, "neuron_items", {}).get(key)
+        if item is None:
+            return
+        path = self.axon_sources[key]
+        match_status = getattr(self, "neuron_match_status", {}).get(key, "")
+        suffix = (
+            "  [Duplicate]" if match_status.startswith("Duplicate")
+            else "  [Unmatched]" if match_status.startswith("Unmatched") else ""
+        )
+        report = getattr(self, "axon_load_reports", {}).get(key)
+        if report is not None:
+            suffix += "  [Partial]" if report.is_partial else "  [Read warning]"
+        owner = getattr(self, "neuron_datasets", {}).get(key)
+        dataset = getattr(self, "datasets", {}).get(owner)
+        prefix = f"Dataset {dataset.brain_id}\n" if dataset is not None else ""
+        tooltip = f"{prefix}{match_status}\n{path}".strip()
+        if report is not None:
+            tooltip += f"\n\n{report.summary_text()}\nDetails: File > SWC load diagnostics..."
+        # Text and tooltip edits also emit itemChanged; they must not toggle
+        # neuron visibility recursively while its actor is being created.
+        with QtCore.QSignalBlocker(self.neuron_list):
+            item.setText(f"    {path.stem}{suffix}")
+            item.setToolTip(tooltip)
+
+    def _show_swc_diagnostics(self, _checked=False) -> None:
+        reports = self.axon_load_reports
+        if not reports:
+            QtWidgets.QMessageBox.information(
+                self, "SWC load diagnostics",
+                "No warnings recorded for successfully loaded SWCs in this window. "
+                "Files that have not been loaded have not been checked.",
+            )
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("SWC load diagnostics")
+        dialog.resize(850, 540)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        note = QtWidgets.QLabel(
+            "Warnings from the most recent successful reads in this window. "
+            "Original SWC files are unchanged. Files never loaded have not been checked."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        selector = QtWidgets.QComboBox()
+        keys = sorted(reports, key=lambda key: str(self.axon_sources[key]))
+        for key in keys:
+            selector.addItem(self.axon_sources[key].name, key)
+        layout.addWidget(selector)
+        details = QtWidgets.QPlainTextEdit()
+        details.setReadOnly(True)
+        layout.addWidget(details)
+        def display_report(_index=0):
+            key = selector.currentData()
+            details.setPlainText(reports[key].detail_text())
+        selector.currentIndexChanged.connect(display_report)
+        display_report()
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def _ensure_axon_actor(self, key: str):
         actor = self.axon_actors.get(key)
         if actor is not None:
+            actor.set_width(self.axon_width.value())
             self._touch_axon_actor(key)
             return actor
-        points, edges = read_swc(self.axon_sources[key])
-        size = self.axon_width.value()
-        actor = self.plotter.add_mesh(
-            axon_tube_mesh(points, edges, size),
-            color=self.manual_colors[key],
-            line_width=1.0,
-            render_lines_as_tubes=False,
-            smooth_shading=size > 0,
+        if self.axon_sources[key].stat().st_size > MAX_AXON_FILE_BYTES:
+            raise ValueError("SWC exceeds the 64 MiB per-file interactive loading limit")
+        budget = getattr(self, 'axon_budget', None)
+        limit = (budget.value() if budget is not None else DEFAULT_AXON_BUDGET_MB) * 1024**2
+        used = sum(a.geometry_estimate for a in self.axon_actors.values())
+        # Free hidden instances before importing. Temporary parser RAM has its
+        # own safety limit; it must not consume the remaining geometry budget.
+        for old_key in list(self.axon_actors):
+            old = self.axon_actors[old_key]
+            if not old.GetVisibility():
+                used -= old.geometry_estimate
+                self._remove_axon_actor(old_key)
+        parse_bytes = MAX_AXON_PARSE_BYTES
+        if sys.platform == "win32":
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
+                    (name, ctypes.c_ulonglong) for name in (
+                        "total_physical", "available_physical", "total_pagefile",
+                        "available_pagefile", "total_virtual", "available_virtual",
+                        "available_extended_virtual",
+                    )
+                ]
+            status = MemoryStatus()
+            status.length = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                parse_bytes = min(parse_bytes, status.available_physical // 4)
+        _ids, points, edges, report = read_swc_partial(
+            self.axon_sources[key], max_nodes=parse_bytes // AXON_PARSE_BYTES_PER_NODE
+        )
+        estimate = AxonActor.estimate_bytes(len(points), len(edges))
+        if getattr(self, "axon_budget_enforced", False) and used + estimate > limit:
+            raise MemoryError(
+                f"Axon geometry budget reached: this neuron needs an estimated "
+                f"{estimate / 1024**2:.1f} MiB; {max(0, limit - used) / 1024**2:.1f} MiB "
+                f"remains of the {limit / 1024**2:.0f} MiB budget. "
+                "Deselect neurons or adjust Settings > Axon memory settings. "
+                "The SWC file is unchanged."
+            )
+        actor = AxonActor(points, edges, self.manual_colors[key], self.axon_width.value())
+        self.plotter.add_actor(
+            actor,
             name="axon_" + hashlib.sha256(key.encode("utf-8")).hexdigest(),
+            reset_camera=False,
             render=False,
         )
         actor.SetVisibility(False)
         self.axon_actors[key] = actor
         self._touch_axon_actor(key)
+        ViewerWindow._record_axon_load_report(self, key, report)
         return actor
 
     def _touch_axon_actor(self, key: str) -> None:
@@ -3059,21 +3280,27 @@ class ViewerWindow(QtWidgets.QMainWindow):
     def _trim_hidden_axon_cache(self) -> int:
         hidden = []
         hidden_points = 0
+        hidden_bytes = 0
         for key, actor in self.axon_actors.items():
             if actor.GetVisibility():
                 continue
-            points = int(actor.mapper.dataset.n_points)
-            hidden.append((self.axon_actor_last_used.get(key, 0), key, points))
+            mesh = actor.centerlines if isinstance(actor, AxonActor) else actor.mapper.dataset
+            points = int(mesh.n_points)
+            size = actor.geometry_estimate if isinstance(actor, AxonActor) else mesh.GetActualMemorySize() * 1024
+            hidden.append((self.axon_actor_last_used.get(key, 0), key, points, size))
             hidden_points += points
+            hidden_bytes += size
         hidden.sort()
         removed = 0
         while hidden and (
             len(hidden) > MAX_HIDDEN_AXON_ACTORS
             or hidden_points > MAX_HIDDEN_AXON_POINTS
+            or hidden_bytes > MAX_HIDDEN_AXON_BYTES
         ):
-            _last_used, key, points = hidden.pop(0)
+            _last_used, key, points, size = hidden.pop(0)
             self._remove_axon_actor(key)
             hidden_points -= points
+            hidden_bytes -= size
             removed += 1
         return removed
 
@@ -3086,15 +3313,17 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if visible and actor is None:
             actor = self._ensure_axon_actor(key)
         if actor is not None:
+            if visible:
+                actor.set_width(self.axon_width.value())
             actor.SetVisibility(visible)
             self._touch_axon_actor(key)
 
     def _apply_bulk_neuron_selection(self, keys: list[str], checked: bool) -> None:
         progress = None
-        load_keys = [
+        load_keys = {
             key for key in keys
             if checked and self._dataset_enabled_for_neuron(key) and key not in self.axon_actors
-        ]
+        }
         if load_keys:
             progress = QtWidgets.QProgressDialog(
                 "Loading selected axons...", "Cancel", 0, len(load_keys), self
@@ -3115,10 +3344,14 @@ class ViewerWindow(QtWidgets.QMainWindow):
                         self.neuron_items[key].setCheckState(QtCore.Qt.CheckState.Unchecked)
                         failures.append(f"{self.axon_sources[key].name}: {exc}")
                         LOGGER.exception("Could not load axon %s", key)
+                        if isinstance(exc, MemoryError):
+                            break
                         continue
                     self.neuron_items[key].setCheckState(
                         QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked
                     )
+                    if not checked:
+                        self._trim_hidden_axon_cache()
                     if progress is not None and key in load_keys:
                         loaded += 1
                         progress.setValue(loaded)
@@ -3126,11 +3359,51 @@ class ViewerWindow(QtWidgets.QMainWindow):
         finally:
             if progress is not None:
                 progress.close()
-        if failures:
-            QtWidgets.QMessageBox.warning(self, "Some neurons could not be loaded", "\n".join(failures[:20]))
+            # Cancelling a dataset re-enable must not leave unloaded neurons
+            # checked; reflect the actual scene, including budget failures.
+            if checked:
+                with QtCore.QSignalBlocker(self.neuron_list):
+                    for key in keys:
+                        if self._dataset_enabled_for_neuron(key):
+                            actor = self.axon_actors.get(key)
+                            if actor is None or not actor.GetVisibility():
+                                self.neuron_items[key].setCheckState(QtCore.Qt.CheckState.Unchecked)
+        warning_keys = []
+        if not hasattr(self, "axon_report_notified"):
+            self.axon_report_notified = {}
+        for key in keys:
+            report = getattr(self, "axon_load_reports", {}).get(key)
+            actor = self.axon_actors.get(key)
+            if key in load_keys and actor is not None and actor.GetVisibility() and report is not None:
+                signature = report.detail_text()
+                if self.axon_report_notified.get(key) != signature:
+                    warning_keys.append(key)
+                    self.axon_report_notified[key] = signature
+        if failures or warning_keys:
+            parts = []
+            if warning_keys:
+                parts.append("Valid portions were loaded without changing the original SWC files.")
+                parts.extend(
+                    f"{self.axon_sources[key].name}: {self.axon_load_reports[key].summary_text()}"
+                    for key in warning_keys[:10]
+                )
+                if len(warning_keys) > 10:
+                    parts.append(f"... and {len(warning_keys) - 10} more files with warnings.")
+                parts.append("View affected lines and node IDs: File > SWC load diagnostics...")
+            if failures:
+                parts.append("Could not load:\n" + "\n".join(failures[:20]))
+                if len(failures) > 20:
+                    parts.append(f"... and {len(failures) - 20} more failures.")
+            QtWidgets.QMessageBox.warning(
+                self, "SWC loading warnings" if warning_keys else "Some neurons could not be loaded",
+                "\n\n".join(parts),
+            )
         self._sync_neuron_region_checks()
         self._refresh_soma_points(render=False)
         self._trim_hidden_axon_cache()
+        if hasattr(self, 'axon_usage'):
+            used = sum(a.geometry_estimate for a in self.axon_actors.values()) / 1024**2
+            self.axon_usage.setText(f"{len(self.axon_actors)} loaded; ~{used:.0f} MiB planned")
         self.plotter.render()
 
     def _load_scene(self) -> None:
@@ -3340,7 +3613,10 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.soma_check.setChecked(bool(self.config.get("show_all_somas", True)))
         self.grid_check.setChecked(bool(self.config.get("show_grid", False)))
         self.legend_check.setChecked(bool(self.config.get("show_region_legend", True)))
-        self._set_brain_style(self.config.get("brain_style", "Surface"), self.config.get("show_brain", True))
+        show_brain = self.config.get("show_brain", True)
+        with QtCore.QSignalBlocker(self.template_check):
+            self.template_check.setChecked(show_brain)
+        self._set_brain_style(self.config.get("brain_style", "Surface"), show_brain)
         self.slice_slider.setValue(min(self.annotation.shape[2] - 1, self.config.get("slice_index", self.annotation.shape[2] // 2)))
         self.slice_check.setChecked(self.config.get("show_slice", True))
         self.color_mode.setCurrentText(self.config.get("color_mode", "Independent / manual"))
@@ -3395,6 +3671,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.annotation.spacing[:2],
             position_um,
             self.ontology,
+            annotation=self.annotation,
         )
         if self.slice_actor is not None:
             self.plotter.remove_actor(self.slice_actor, render=False)
@@ -3493,8 +3770,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
                     and self.neuron_ids[key] in dataset.soma_point_by_id
                 ]
                 points = np.asarray(points, dtype=np.float32).reshape((-1, 3))
-            dataset.soma_mesh.points = points
-            dataset.soma_mesh.Modified()
+            # Replacing only points leaves the old vertex cells referencing deleted
+            # point IDs when the selected subset is shorter (or empty).
+            dataset.soma_mesh.copy_from(pv.PolyData(points), deep=False)
             dataset.soma_actor.SetVisibility(dataset.enabled)
         if render:
             self.plotter.render()
@@ -3614,10 +3892,17 @@ class ViewerWindow(QtWidgets.QMainWindow):
         transparent: bool,
         jpeg_quality: int,
     ) -> None:
+        flush_width = getattr(self, "_apply_pending_axon_width", None)
+        if callable(flush_width):
+            flush_width()
         actor_groups = self._export_actor_groups()
         original = self._set_export_visibility(actor_groups, contents)
         image_data = None
+        recovery_timer = getattr(self, "recovery_timer", None)
+        recovery_active = recovery_timer is not None and recovery_timer.isActive()
         try:
+            if recovery_active:
+                recovery_timer.stop()
             self.plotter.render()
             image_data = self.plotter.screenshot(
                 transparent_background=transparent,
@@ -3625,26 +3910,38 @@ class ViewerWindow(QtWidgets.QMainWindow):
                 scale=scale,
             )
         finally:
-            for actor, visible in original:
-                actor.SetVisibility(visible)
-            self.plotter.render()
+            try:
+                for actor, visible in original:
+                    actor.SetVisibility(visible)
+                self.plotter.render()
+            finally:
+                if recovery_active:
+                    recovery_timer.start()
 
         if image_data is None:
             raise RuntimeError("The 3D renderer did not return an image.")
-        image = Image.fromarray(np.asarray(image_data))
         suffix = path.suffix.lower()
-        if suffix in (".tif", ".tiff"):
-            image.save(path, format="TIFF", compression="tiff_lzw")
-        elif suffix == ".png":
-            image.save(path, format="PNG", optimize=True)
-        elif suffix in (".jpg", ".jpeg"):
-            image.convert("RGB").save(
-                path, format="JPEG", quality=jpeg_quality, subsampling=0, optimize=True
-            )
-        elif suffix == ".bmp":
-            image.convert("RGB").save(path, format="BMP")
-        else:
-            raise ValueError(f"Unsupported capture format: {suffix}")
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.part")
+        try:
+            with Image.fromarray(np.asarray(image_data)) as image, temporary.open("xb") as stream:
+                if suffix in (".tif", ".tiff"):
+                    image.save(stream, format="TIFF", compression="tiff_lzw")
+                elif suffix == ".png":
+                    image.save(stream, format="PNG", optimize=True)
+                elif suffix in (".jpg", ".jpeg"):
+                    with image.convert("RGB") as rgb:
+                        rgb.save(stream, format="JPEG", quality=jpeg_quality,
+                                 subsampling=0, optimize=True)
+                elif suffix == ".bmp":
+                    with image.convert("RGB") as rgb:
+                        rgb.save(stream, format="BMP")
+                else:
+                    raise ValueError(f"Unsupported capture format: {suffix}")
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
         self.status.setText(f"Capture saved: {path}")
 
     def export_rotating_gif(
@@ -3656,11 +3953,21 @@ class ViewerWindow(QtWidgets.QMainWindow):
         scale: int,
         direction: int,
     ) -> bool:
+        from PIL import GifImagePlugin
+
+        if not isinstance(frames, int) or frames < 1:
+            raise ValueError("GIF frame count must be a positive integer.")
+        if not np.isfinite(duration_seconds) or duration_seconds <= 0:
+            raise ValueError("GIF duration must be positive and finite.")
+        if not isinstance(scale, int) or scale < 1:
+            raise ValueError("GIF scale must be a positive integer.")
+        flush_width = getattr(self, "_apply_pending_axon_width", None)
+        if callable(flush_width):
+            flush_width()
         actor_groups = self._export_actor_groups()
         original_visibility = self._set_export_visibility(actor_groups, contents)
         original_camera = [tuple(vector) for vector in self.plotter.camera_position]
-        images: list[Image.Image] = []
-        temporary = path.with_suffix(path.suffix + ".part")
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.part")
         progress = QtWidgets.QProgressDialog(
             "Rendering rotating GIF...", "Cancel", 0, frames, self
         )
@@ -3669,45 +3976,57 @@ class ViewerWindow(QtWidgets.QMainWindow):
         progress.setMinimumDuration(0)
         progress.setValue(0)
         cancelled = False
+        recovery_timer = getattr(self, "recovery_timer", None)
+        recovery_active = recovery_timer is not None and recovery_timer.isActive()
         try:
+            if recovery_active:
+                recovery_timer.stop()
             self.plotter.render()
             angle = direction * 360.0 / frames
-            for index in range(frames):
-                QtWidgets.QApplication.processEvents()
-                if progress.wasCanceled():
-                    cancelled = True
-                    break
-                image_data = self.plotter.screenshot(return_img=True, scale=scale)
-                if image_data is None:
-                    raise RuntimeError("The 3D renderer did not return an image.")
-                image = Image.fromarray(np.asarray(image_data)).convert("RGB")
-                images.append(image.quantize(colors=256))
-                self.plotter.camera.Azimuth(angle)
-                self.plotter.render()
-                progress.setValue(index + 1)
+            frame_duration = max(20, round(duration_seconds * 1000 / frames))
+            # Pillow's multi-frame save retains all frames while encoding. Write
+            # the GIF blocks per frame so memory stays independent of frame count.
+            with temporary.open("xb") as stream:
+                for index in range(frames):
+                    QtWidgets.QApplication.processEvents()
+                    if progress.wasCanceled():
+                        cancelled = True
+                        break
+                    image_data = self.plotter.screenshot(return_img=True, scale=scale)
+                    if image_data is None:
+                        raise RuntimeError("The 3D renderer did not return an image.")
+                    with Image.fromarray(np.asarray(image_data)) as captured:
+                        with captured.convert("RGB") as rgb:
+                            with rgb.quantize(colors=256) as frame:
+                                if index == 0:
+                                    header, _ = GifImagePlugin.getheader(
+                                        frame, info={"loop": 0, "optimize": False}
+                                    )
+                                    stream.writelines(header)
+                                stream.writelines(GifImagePlugin.getdata(
+                                    frame, duration=frame_duration, disposal=2,
+                                    include_color_table=index > 0,
+                                ))
+                    del image_data
+                    self.plotter.camera.Azimuth(angle)
+                    self.plotter.render()
+                    progress.setValue(index + 1)
+                if not cancelled:
+                    stream.write(b";")
             if not cancelled:
-                progress.setLabelText("Encoding GIF...")
-                QtWidgets.QApplication.processEvents()
-                frame_duration = max(20, round(duration_seconds * 1000 / frames))
-                images[0].save(
-                    temporary,
-                    format="GIF",
-                    save_all=True,
-                    append_images=images[1:],
-                    duration=frame_duration,
-                    loop=0,
-                    disposal=2,
-                    optimize=False,
-                )
                 temporary.replace(path)
         finally:
-            progress.close()
-            for actor, visible in original_visibility:
-                actor.SetVisibility(visible)
-            self.plotter.camera_position = original_camera
-            self.plotter.render()
-            if temporary.exists():
-                temporary.unlink()
+            try:
+                progress.close()
+                for actor, visible in original_visibility:
+                    actor.SetVisibility(visible)
+                self.plotter.camera_position = original_camera
+                self.plotter.render()
+                if temporary.exists():
+                    temporary.unlink()
+            finally:
+                if recovery_active:
+                    recovery_timer.start()
         if cancelled:
             self.status.setText("GIF recording cancelled.")
             return False
@@ -3731,12 +4050,28 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.coronal_repeat_timer.stop()
         self.coronal_repeat_step = 0
 
+    def _show_axon_settings(self) -> None:
+        used = sum(actor.geometry_estimate for actor in self.axon_actors.values()) / 1024**2
+        self.axon_usage.setText(f"{len(self.axon_actors)} loaded; ~{used:.0f} MiB planned")
+        self.axon_settings_dialog.exec()
+
+    def _set_axon_budget_policy(self, _value=None) -> None:
+        self.axon_budget_enforced = self.axon_budget_check.isChecked()
+        self.axon_budget.setEnabled(self.axon_budget_enforced)
+        settings = QtCore.QSettings("LiBoLab", "fMOSTBrainViewer")
+        settings.setValue("axon_memory_budget_enforced", self.axon_budget_enforced)
+        settings.setValue("axon_memory_budget_mib", self.axon_budget.value())
+        settings.sync()
+
     def _set_axon_width(self, width: float) -> None:
-        visible = [key for key, actor in self.axon_actors.items() if actor.GetVisibility()]
-        for key in list(self.axon_actors):
-            self._remove_axon_actor(key)
-        for key in visible:
-            self._ensure_axon_actor(key).SetVisibility(True)
+        self.axon_width_timer.start()
+
+    def _apply_pending_axon_width(self) -> None:
+        self.axon_width_timer.stop()
+        width = self.axon_width.value()
+        for actor in self.axon_actors.values():
+            if actor.GetVisibility():
+                actor.set_width(width)
         self.plotter.render()
 
     def _set_soma_size(self, size: float) -> None:
@@ -3967,7 +4302,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
                     while self.neuron_list.count() > old_count:
                         self.neuron_list.takeItem(self.neuron_list.count() - 1)
                     for neuron_key in [k for k, owner in self.neuron_datasets.items() if owner == key]:
-                        for mapping in (self.neuron_datasets, self.neuron_items, self.axon_sources, self.neuron_ids, self.neuron_match_status, self.manual_colors):
+                        for mapping in (self.neuron_datasets, self.neuron_items, self.axon_sources, self.neuron_ids, self.neuron_match_status, self.manual_colors, self.axon_load_reports, self.axon_report_notified):
                             mapping.pop(neuron_key, None)
         if failures:
             QtWidgets.QMessageBox.warning(self, "Some datasets could not be added", "\n".join(failures[:20]))
@@ -4035,6 +4370,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.neuron_datasets.pop(neuron_key, None)
             self.neuron_items.pop(neuron_key, None)
             self.manual_colors.pop(neuron_key, None)
+            self.axon_load_reports.pop(neuron_key, None)
+            self.axon_report_notified.pop(neuron_key, None)
         if dataset.soma_actor is not None:
             self.plotter.remove_actor(dataset.soma_actor, reset_camera=False, render=False)
         self.datasets.pop(key)
@@ -4077,6 +4414,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
                 )
                 self.neuron_list.addItem(neuron_item)
                 self.neuron_items[neuron_key] = neuron_item
+                self._update_axon_diagnostic_label(neuron_key)
         self.neuron_list.blockSignals(False)
         self._populate_dataset_list()
         self._refresh_aggregate_metadata()
@@ -4241,6 +4579,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
                 self.setEnabled(True)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if getattr(self, "_scene_closed", False):
+            event.accept()
+            return
         if getattr(self, "_skip_session_save_once", False):
             self._skip_session_save_once = False
         elif not self._confirm_session_close():
@@ -4254,6 +4595,10 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.update_check_thread.quit()
             event.ignore()
             return
+        for name in ("axon_width_timer", "coronal_repeat_timer"):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                timer.stop()
         if hasattr(self, "recovery_timer"):
             self.recovery_timer.stop()
             try:
@@ -4263,6 +4608,32 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.plotter.close()
         if hasattr(self, "annotation"):
             self.annotation.close()
+            self.annotation = None
+        # Closed windows remain reachable in the replacement-window chain.
+        # Release their scene references as well as the renderer's references.
+        for name in (
+            "axon_actors", "axon_actor_last_used", "region_actors", "datasets",
+            "axon_load_reports", "axon_report_notified",
+            "axon_sources", "neuron_ids", "neuron_match_status", "neuron_datasets",
+            "neuron_items", "neuron_region_items", "neurons_by_region",
+            "region_items", "dataset_items", "manual_colors",
+        ):
+            mapping = getattr(self, name, None)
+            if isinstance(mapping, dict):
+                mapping.clear()
+        for name in (
+            "surface_actor", "volume_actor", "slice_actor", "legend_actor",
+            "axes_actor", "bounds_actor",
+        ):
+            if hasattr(self, name):
+                setattr(self, name, None)
+        for name in ("dataset_list", "neuron_list", "neuron_region_list", "region_list", "region_search_results"):
+            listing = getattr(self, name, None)
+            if listing is not None:
+                with QtCore.QSignalBlocker(listing):
+                    listing.clear()
+        self.config = {}
+        self._scene_closed = True
         event.accept()
 
 
@@ -4410,7 +4781,7 @@ def load_session_file(
     projects: list[tuple[str, Path]] = []
     key_replacements: dict[str, str] = {}
     retained_entries = []
-    for entry in entries:
+    for entry in config["datasets"]:
         brain_id = str(entry.get("brain_id", ""))
         stored = Path(str(entry.get("project_path", "")))
         project = (path.parent / stored).resolve() if entry.get("relative_path") else stored
@@ -4658,6 +5029,17 @@ def run_self_test(render: bool = True) -> int:
                 image = plotter.screenshot(return_img=True)
                 if image is None or image.size == 0:
                     raise RuntimeError("Off-screen VTK rendering returned no image.")
+                plotter.clear()
+                axon = AxonActor(np.array([[0, 0, 0], [100, 30, 0]], dtype=np.float32),
+                                 np.array([[0, 1]]), "red", 1.0)
+                plotter.add_actor(axon)
+                plotter.view_xy()
+                plotter.reset_camera()
+                axon.set_width(2.0)
+                plotter.render()
+                image = plotter.screenshot(return_img=True)
+                if not np.any(image[:, :, 0].astype(int) > image[:, :, 1].astype(int) + 40):
+                    raise RuntimeError("GPU axon rendering returned no colored segments.")
             finally:
                 plotter.close()
             result_label = "Qt/VTK/PyVista render passed"

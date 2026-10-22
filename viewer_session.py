@@ -113,10 +113,20 @@ def read_legacy_session(path: Path) -> dict:
 
 
 def atomic_json(path: Path, payload: dict) -> None:
+    # Bound the actual UTF-8 payload before touching the destination or a temp
+    # file. Binary output makes this the same byte count enforced by the reader
+    # on Windows as well as platforms without CRLF newline translation.
+    encoded = bytearray()
+    encoder = json.JSONEncoder(indent=2, ensure_ascii=False, allow_nan=False)
+    for fragment in encoder.iterencode(payload):
+        block = fragment.encode("utf-8")
+        if len(encoded) + len(block) > MAX_SESSION_BYTES:
+            raise ValueError("Session exceeds the 16 MiB size limit. Reduce the session size before saving.")
+        encoded.extend(block)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".part")
     try:
-        with temporary.open("w", encoding="utf-8") as stream:
-            json.dump(payload, stream, indent=2, ensure_ascii=False, allow_nan=False)
+        with temporary.open("wb") as stream:
+            stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
         temporary.replace(path)

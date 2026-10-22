@@ -35,6 +35,7 @@ class ReliabilityTests(unittest.TestCase):
                 axon_sources={key: path for key in "ABC"}, manual_colors={key: "red" for key in "ABC"},
                 axon_width=SimpleNamespace(value=lambda: 0), plotter=plotter)
             window._touch_axon_actor = MethodType(v.ViewerWindow._touch_axon_actor, window)
+            window._remove_axon_actor = MethodType(v.ViewerWindow._remove_axon_actor, window)
             try:
                 v.ViewerWindow._ensure_axon_actor(window, "A")
                 b = v.ViewerWindow._ensure_axon_actor(window, "B")
@@ -56,7 +57,7 @@ class ReliabilityTests(unittest.TestCase):
                 raise ValueError("bad row")
             calls.append(key)
         window = SimpleNamespace(neuron_list=listing, neuron_items=items,
-            axon_actors={key: object() for key in items}, axon_sources={key: Path(key) for key in items},
+            axon_actors={key: SimpleNamespace(GetVisibility=lambda: True) for key in items}, axon_sources={key: Path(key) for key in items},
             _dataset_enabled_for_neuron=lambda key: True, _apply_neuron_visibility=apply,
             _remove_axon_actor=mock.Mock(), _sync_neuron_region_checks=mock.Mock(),
             _refresh_soma_points=mock.Mock(), _trim_hidden_axon_cache=mock.Mock(), plotter=mock.Mock())

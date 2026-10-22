@@ -121,4 +121,6 @@ other dependencies retain their own terms; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Citation metadata are provided
 in [CITATION.cff](CITATION.cff).
 
-Current version: **3.0.0 — Safe sessions, imports and updates**.
+Current version: **3.1.3 — Local rendering optimization build**.
+
+This local build is not yet a GitHub release. See [rendering validation and limitations](docs/RENDERING_3.1.md). The published download instructions above still refer to 3.0.0.

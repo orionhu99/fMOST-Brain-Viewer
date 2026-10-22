@@ -107,4 +107,6 @@ Li Bo Lab, Westlake University。Allen 数据、Qt/PySide 和其他依赖保留�
 详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；引用信息见
 [CITATION.cff](CITATION.cff)。
 
-当前版本：**3.0.0 — 稳定的 neuron 显示与调色操作**。
+当前版本：**3.1.3 — 本地渲染优化验证版**。
+
+本版尚未发布到 GitHub；上方正式下载说明仍对应 3.0.0。性能验证、使用限制见 [渲染优化说明](docs/RENDERING_3.1.md)。
