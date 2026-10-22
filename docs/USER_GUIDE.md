@@ -119,12 +119,37 @@ links; missing projects can be relocated or skipped when reopening.
 Session files can contain local paths and dataset identifiers. Review them before
 sharing.
 
-## 7. Logs and support
+## 7. Updates
 
-Choose **Help > Check for updates...** to query published stable GitHub Releases
-without blocking the viewer. Select a newer version to download its Windows
-installer, verify the GitHub SHA-256 digest, and start Setup. Application files
-are replaced; atlas data, projects, sessions, caches, and settings are preserved.
+The running viewer checks published stable GitHub Releases at most once per day
+by default. A new version appears in a non-blocking notice, so viewing and exports
+can continue. Choose **Update now**, **Later**, or **Skip this version**. There is
+no notification while the software is closed and no background Windows service.
+Change this preference in **Settings > Software updates...**. Manual checks via
+**Help > Check for updates...** are always available, including for skipped versions.
+
+To update, select a newer version and choose **Download and restart**. The viewer
+downloads the installer in the background and verifies its SHA-256 digest before
+launching it. Interrupted transfers can resume; transient failures are retried,
+and a complete installer is reused only after verification. Cancelling the download
+leaves the current viewer open.
+
+Before installation, the viewer saves a separate recovery snapshot of the current
+scene, including changes not yet saved to a session file. If saving this snapshot
+fails, installation does not proceed. After successful installation, the updated
+viewer restarts and restores the scene, selected datasets, neurons, display
+settings, and camera. The original session save path is retained; unsaved changes
+remain unsaved until you save that session. Atlas resources, derived caches,
+settings, and original data stay in place, with no atlas download needed for a
+normal update. The snapshot restores references to data, not copies of your SWCs;
+keep the referenced folders accessible.
+
+One-click installation is available in the packaged Windows application. When
+running from Python source, install the downloaded package manually. Users of older
+versions must install version 3.2 or later once to receive automatic notifications
+for future versions.
+
+## 8. Logs and support
 
 Choose **Help > Open log folder** after a startup or rendering error. Logs are
 local and are never uploaded automatically. Remove or replace paths and dataset

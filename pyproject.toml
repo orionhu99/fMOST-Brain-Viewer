@@ -23,7 +23,7 @@ dependencies = [
 fmost-brain-viewer = "fmost_brain_viewer:main"
 
 [tool.setuptools]
-py-modules = ["fmost_brain_viewer", "version", "viewer_data", "viewer_session", "viewer_cache", "viewer_updater"]
+py-modules = ["fmost_brain_viewer", "version", "viewer_data", "viewer_session", "viewer_cache", "viewer_updater", "viewer_update_state", "viewer_rendering"]
 
 [tool.setuptools.dynamic]
 version = { attr = "version.__version__" }

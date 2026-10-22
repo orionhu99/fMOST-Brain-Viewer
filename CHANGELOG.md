@@ -1,5 +1,42 @@
 # Changelog
 
+## 3.2.0 — 2026-10-23
+
+- Check stable GitHub Releases in the background at most once per day while the viewer runs, with an opt-out in Settings and a non-blocking update notice supporting Later and Skip this version.
+- Download and SHA-256-verify updates with retry, resumable partial files, and reuse of verified installer downloads.
+- Save an update recovery snapshot before installation, update in place, and restart into the previous scene with its original session save path. Preserve atlas resources, caches, settings, and experimental inputs.
+- Include the 3.1.x GPU axon rendering, compact SWC parser, optional geometry budget, read-only partial loading with diagnostics, and session/export fixes described below.
+- Make Windows CI and release steps stop immediately when tests, version checks, privacy scans, or native build commands fail; prevent a later successful command from masking an earlier failure.
+
+## 3.1.3 — 2026-10-23 (local update)
+
+- Load surviving valid axon nodes and connections from damaged SWCs without writing to source files or inventing missing geometry. Keep strict parsing for soma data and analysis.
+- Mark partial neurons in the list, combine load warnings per selection, and expose affected lines/node IDs through File > SWC load diagnostics.
+- Exclude ambiguous duplicate IDs and cycle edges; report skipped records, missing parent connections, and in-memory NUL cleanup. Diagnostic previews are bounded with exact overall counts.
+
+## 3.1.2 — 2026-10-23 (local update)
+
+- Make the fixed geometry budget optional and disabled by default; remember an explicitly selected policy and limit in Settings.
+- Separate temporary SWC parsing memory from the remaining axon geometry budget, so neurons that fit are no longer rejected by a 1 KiB-per-node parsing reservation.
+- Reduce SWC parsing memory with compact numeric buffers and array-based topology validation while retaining strict corruption checks. Input SWC files remain read-only.
+- Report required and remaining geometry budgets when a neuron genuinely exceeds the limit. Bound temporary parsing separately and adapt its allowance to available Windows physical memory.
+
+## 3.1.1 — 2026-10-23 (local update)
+
+- Move the axon memory budget and resource estimate from Appearance into Settings > Axon memory settings, preserving their existing behavior.
+
+## 3.1.0 — 2026-10-23 (local validation build)
+
+- Render axons with GPU-instanced segments instead of expanded tube meshes. Preserve all original nodes and edges; retain world-space thickness. Segment joins may look different from the previous tube interpolation.
+- Coalesce thickness edits, reuse actor/instance data, and stop idle periodic renders.
+- Bound interactive SWC parsing and geometry allocations, show a configurable axon memory planning budget, and promptly evict hidden geometry.
+- Fix the session-open NameError, closed-window geometry retention, soma vertex indexing, and hidden-brain checkbox restoration.
+- Keep the interface responsive while cancelling a region-cache task; the current VTK filter still needs to finish.
+- Stream GIF frames and atomically replace screenshot/GIF outputs. Protect recovery snapshots from temporary export visibility.
+- Decode legacy uint16 atlas labels/background correctly and invalidate the old whole-brain surface cache.
+- Enforce the session read/write size limit consistently before overwriting a saved session.
+- Refresh vulnerable locked dependencies and add actual GPU, memory, cancellation and export regression tests.
+
 ## 3.0.0 — 2026-09-07
 
 - Preserve non-application files during installation and upgrades; stop forcing applications closed.

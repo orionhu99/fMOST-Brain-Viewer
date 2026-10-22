@@ -1,6 +1,6 @@
 # fMOST Brain Viewer
 
-[Version 3.0 migration and safety changes](docs/RELEASE_3.0.md)
+[Version 3.2 update and migration notes](docs/RELEASE_3.2.md)
 
 [中文说明](README_zh-CN.md) · [User guide](docs/USER_GUIDE.md) · [Report a bug](https://github.com/orionhu99/fMOST-Brain-Viewer/issues)
 
@@ -17,14 +17,14 @@ rotating GIF export, and reusable sessions.
 
 Python, Git, and a command prompt are **not** required.
 
-1. Download `fMOST-Brain-Viewer-Setup-3.0.0-win64.exe` from the
+1. Download `fMOST-Brain-Viewer-Setup-3.2.0-win64.exe` from the
    [latest release](https://github.com/orionhu99/fMOST-Brain-Viewer/releases/latest).
 2. Double-click the installer and follow the short setup wizard.
 3. Start **fMOST Brain Viewer**. On first launch, download the Allen CCF atlas or
    select an existing atlas folder.
 4. Choose a registered dataset folder and start viewing.
 
-The unsigned first release may trigger a Microsoft SmartScreen warning. Compare
+An unsigned installer may trigger a Microsoft SmartScreen warning. Compare
 the installer's SHA-256 hash with `SHA256SUMS.txt` before continuing. A portable
 ZIP containing the same application is available on the release page.
 
@@ -81,19 +81,40 @@ manual region corrections, and import diagnostics.
 - Search atlas structures live by acronym, name, or Allen structure ID, then
   add the highlighted result by keyboard or mouse.
 - Render only the connected SWC line topology, without fixed-size node markers.
-- Render enlarged axons as continuous smooth tubes while retaining a thin 0x line mode.
+- Render enlarged axons with GPU-instanced segments and responsive width changes,
+  while retaining a thin 0x line mode.
 - Keep soma display independent or strictly bound to visible axons.
 - Save and reopen multi-dataset `.fmost-session.json` sessions.
 - Export TIFF, PNG, JPEG, or BMP captures and looping rotating GIFs.
 - Limit hidden axon actor caching to reduce memory growth during long sessions.
-- Check GitHub Releases in the background from the Help menu and install a
-  selected, SHA-256-verified newer version.
+- Load surviving valid parts of damaged axon SWCs without changing the source;
+  inspect missing connections and skipped records through SWC load diagnostics.
+- Automatically check stable GitHub Releases once per day while the viewer is
+  running; choose when to download, verify, install, and restore the current session.
+
+## Updating an existing installation
+
+Version 3.2 adds a non-blocking update notification with **Update now**, **Later**,
+and **Skip this version** choices. Automatic checks can be disabled in
+**Settings > Software updates...**;
+**Help > Check for updates...** remains available at any time. Downloads support
+retry/resume and reuse verified installers. Before installation, the viewer saves
+a separate recovery snapshot; after a successful update it restarts with the same
+scene and original session save path. Atlas data, caches, settings, and original
+datasets are preserved. No atlas download is required for an ordinary update.
+
+Users of older versions need to install this release once to receive automatic
+notifications for future releases. Checks run only while the viewer is open; no
+background Windows service or notification while the software is closed is used.
+See [the user guide](docs/USER_GUIDE.md#7-updates) for details.
 
 ## Privacy and data handling
 
 fMOST Brain Viewer contains no telemetry and does not upload user datasets.
-Network access occurs only when the user explicitly requests Allen atlas or
-ontology resources, or chooses **Help > Check for updates**. SWC, CSV, and NRRD inputs are read-only; derived caches,
+With automatic update checking enabled, the running viewer periodically queries
+GitHub for public release metadata. This sends no dataset or session content.
+Other network access is used for requested atlas/ontology downloads and manual
+update checks or installer downloads. SWC, CSV, and NRRD inputs are read-only; derived caches,
 settings, logs, captures, and sessions are stored separately. Before sharing a
 session, log, or screenshot, review it for paths and identifiers from your own
 environment.
@@ -121,4 +142,5 @@ other dependencies retain their own terms; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Citation metadata are provided
 in [CITATION.cff](CITATION.cff).
 
-Current version: **3.0.0 — Safe sessions, imports and updates**.
+Current version: **3.2.0**. See the [release notes](docs/RELEASE_3.2.md) and
+[rendering validation and limitations](docs/RENDERING_3.1.md).

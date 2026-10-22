@@ -84,6 +84,27 @@ The session's atlas signature differs from the configured atlas. Select the atla
 used to create the session or cancel. Continuing silently would make spatial
 comparisons unreliable.
 
+## No automatic update notification appears
+
+Automatic checks require version 3.2 or later, an open viewer, and access to
+GitHub. They run at most once a day and omit versions you chose to skip. Check
+**Settings > Software updates...**, or use **Help > Check for updates...** for an
+immediate manual check. Drafts and prereleases are not offered as stable updates.
+
+## An update download or restart fails
+
+Check free disk space, write permission, and access to GitHub Releases. Retry the
+same version to resume a valid partial download; if a server ignores resume
+requests, the affected installer is downloaded again. The viewer will not launch
+an installer with a missing or mismatched SHA-256 digest. Do not substitute files
+from an untrusted mirror.
+
+If the pre-install recovery snapshot cannot be saved, the viewer stays open and
+installation does not start. If Setup reports a failure or cannot restart the
+viewer, reopen the installed application and check the displayed recovery options
+and local logs. Keep the atlas and dataset folders accessible. An update snapshot
+does not replace a separately saved session or a backup of experimental data.
+
 ## Reporting a reproducible bug
 
 Use the GitHub bug template. Include a minimal synthetic dataset if needed, the
